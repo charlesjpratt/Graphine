@@ -1,6 +1,6 @@
 {
   "name": "graphine",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Keystroke recording and playback writing app",
   "main": "out/main/index.js",
   "scripts": {
@@ -23,6 +23,11 @@
       "target": [
         { "target": "dmg", "arch": ["arm64", "x64"] },
         { "target": "zip", "arch": ["arm64", "x64"] }
+      ]
+    },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] }
       ]
     },
     "dmg": {
