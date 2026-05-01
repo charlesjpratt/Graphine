@@ -1,0 +1,45 @@
+{
+  "name": "graphine",
+  "version": "1.0.0",
+  "description": "Keystroke recording and playback writing app",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "dist": "electron-vite build && electron-builder",
+    "dist:dir": "electron-vite build && electron-builder --dir"
+  },
+  "build": {
+    "appId": "com.charlespratt.graphine",
+    "productName": "Graphine",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": ["out/**/*"],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "target": [
+        { "target": "dmg", "arch": ["arm64", "x64"] },
+        { "target": "zip", "arch": ["arm64", "x64"] }
+      ]
+    },
+    "dmg": {
+      "contents": [
+        { "x": 130, "y": 220 },
+        { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
+      ]
+    },
+    "fileAssociations": [
+      { "ext": "grph", "name": "Graphine Recording" }
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "electron-vite": "^2.3.0",
+    "typescript": "^5.4.0"
+  }
+}

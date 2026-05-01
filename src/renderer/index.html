@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Graphine</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body data-view="write" data-state="recording">
+  <header>
+    <div id="drag-region"></div>
+    <nav>
+      <button id="tab-write" class="tab active" aria-pressed="true">Write</button>
+      <button id="tab-replay" class="tab" aria-pressed="false">Replay</button>
+    </nav>
+    <div id="char-stats" aria-hidden="true">
+      <div id="stat-bar">
+        <div id="seg-typed"></div>
+        <div id="seg-pasted"></div>
+        <div id="seg-overwrite"></div>
+      </div>
+      <div id="stat-labels">
+        <span id="stat-typed-val"></span>
+        <span id="stat-pasted-val"></span>
+        <span id="stat-overwrite-val"></span>
+      </div>
+    </div>
+    <div id="format-controls">
+      <button id="btn-bold" class="fmt-btn" title="Bold (⌘B)">B</button>
+      <button id="btn-italic" class="fmt-btn" title="Italic (⌘I)">I</button>
+      <input id="font-size-input" class="fmt-input" type="text" value="12" aria-label="Font size" title="Font size" />
+      <select id="font-family-select" class="fmt-input fmt-select" aria-label="Font family" title="Font family">
+        <option value="serif">Serif</option>
+        <option value="sans">Sans</option>
+        <option value="mono">Mono</option>
+      </select>
+    </div>
+    <div id="replay-header-controls">
+      <button id="btn-open-replay">Open</button>
+    </div>
+    <div id="record-controls">
+      <span id="rec-indicator" aria-label="Recording">
+        <span class="rec-dot"></span>REC
+      </span>
+      <button id="btn-stop-save">Stop &amp; Save</button>
+      <button id="btn-open-header">Open</button>
+      <button id="btn-new">New</button>
+    </div>
+  </header>
+
+  <div id="app-body">
+    <aside id="tab-sidebar">
+      <button id="btn-sidebar-toggle" title="Hide sidebar" aria-label="Hide sidebar" aria-expanded="true">‹</button>
+      <div id="doc-tab-bar" role="tablist" aria-label="Document tabs"></div>
+      <button id="btn-add-tab" title="New tab" aria-label="Add tab">+</button>
+    </aside>
+
+    <main>
+      <section id="write-view" aria-label="Write">
+        <div id="write-scroll">
+          <div
+            id="write-area"
+            contenteditable="true"
+            spellcheck="true"
+            autofocus
+            aria-label="Write area"
+            data-placeholder="Start writing…"
+          ></div>
+        </div>
+        <div id="minimap-wrap">
+          <button id="btn-minimap-toggle" title="Hide minimap" aria-label="Hide minimap" aria-expanded="true">›</button>
+          <canvas id="minimap"></canvas>
+        </div>
+      </section>
+
+      <section id="replay-view" aria-label="Replay" aria-hidden="true">
+        <div id="replay-blocked">
+          <span>Save your recording to view replay.</span>
+          <button id="btn-save-for-replay">Save</button>
+        </div>
+        <div id="replay-area" contenteditable="false" aria-label="Replay area"></div>
+        <div id="player-controls">
+          <div id="player-top">
+            <button id="btn-play-pause" disabled>Play</button>
+            <button id="btn-stop-playback" disabled>Stop</button>
+            <button id="btn-skip-end" disabled>Skip to End</button>
+          </div>
+          <div id="speed-controls" aria-label="Playback speed">
+            <button class="speed-btn active" data-speed="1" aria-pressed="true">1×</button>
+            <button class="speed-btn" data-speed="2" aria-pressed="false">2×</button>
+            <button class="speed-btn" data-speed="5" aria-pressed="false">5×</button>
+            <button class="speed-btn" data-speed="10" aria-pressed="false">10×</button>
+          </div>
+          <div
+            id="progress-container"
+            role="progressbar"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow="0"
+          >
+            <div id="progress-bar"></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" aria-live="polite" aria-atomic="true"></div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
