@@ -1,6 +1,15 @@
+export interface FrameDelta {
+  p: number;  // common-prefix length
+  r: number;  // chars removed after the prefix
+  i: string;  // inserted substring
+}
+
 export interface Frame {
   t: number;
-  v: string;
+  v?: string;        // full-HTML keyframe (first frame, baseline, tab-switch, legacy v1)
+  d?: FrameDelta;    // delta against previously reconstructed HTML
+  tabSwitch?: { toTabId: string; toTabName: string };
+  baseline?: boolean;
 }
 
 export interface RecordingMeta {
@@ -11,7 +20,7 @@ export interface RecordingMeta {
 }
 
 export interface Recording {
-  version: 1;
+  version: 1 | 2;
   meta: RecordingMeta;
   frames: Frame[];
 }
@@ -38,9 +47,11 @@ export interface Tab {
 }
 
 export interface GraphineDocument {
-  version: 2
+  version: 3
   tabs: Tab[]
   activeTabId: string
+  sessionRecording: Recording | null
+  sessionStartTabId?: string
 }
 
 export interface TabRuntime {
@@ -49,9 +60,9 @@ export interface TabRuntime {
   editorHtml: string
   state: AppState
   loadedRecording: Recording | null
-  pendingPartialRecording: Recording | null
   fontSizeRem: number
   pendingFontSize: number | null
+  pendingFontFamily: string | null
   savedRange: Range | null
   fontFamily: string
 }

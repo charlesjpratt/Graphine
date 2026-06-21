@@ -2,9 +2,10 @@ import { Recorder } from './recorder'
 import { Player } from './player'
 import { switchView, applyState, updateProgress, showToast, setupInactivityHiding, updateStats } from './ui'
 import { AppState } from './types'
-import type { Recording, TabRuntime, GraphineDocument } from './types'
+import type { Recording, Tab, TabRuntime, GraphineDocument } from './types'
 import { createTab, renderTabBar, startRename } from './tabs'
 import { setupMinimap } from './minimap'
+import { lastFrameHtml } from './frameCodec'
 
 const writeArea = document.getElementById('write-area') as HTMLDivElement
 const writeScroll = document.getElementById('write-scroll') as HTMLDivElement
@@ -48,6 +49,8 @@ const player = new Player(replayArea, { speedMultiplier: 1, maxGapMs: 3000 })
 let tabs: TabRuntime[] = [createTab('Tab 1')]
 let activeTabIndex = 0
 let currentFilePath: string | null = null
+let sessionRecording: Recording | null = null
+let sessionStartTabId: string | null = null
 
 const activeTab = () => tabs[activeTabIndex]
 
@@ -57,16 +60,23 @@ player.onComplete(() => {
   transition(AppState.Recorded)
   showToast('Playback complete')
 })
+player.onTabSwitch((toTabId) => {
+  const idx = tabs.findIndex(t => t.id === toTabId)
+  if (idx === -1) return
+  activeTabIndex = idx
+  renderTabBar(tabs, toTabId, docTabBar, tabBarCallbacks)
+})
 
 function updateReplayAvailable(): void {
-  document.body.dataset.replayAvailable = activeTab().loadedRecording !== null ? 'true' : 'false'
+  document.body.dataset.replayAvailable =
+    (sessionRecording !== null || activeTab().loadedRecording !== null) ? 'true' : 'false'
 }
 
 function transition(next: AppState): void {
   activeTab().state = next
   applyState(next)
 
-  const hasRecording = activeTab().loadedRecording !== null
+  const hasRecording = sessionRecording !== null || activeTab().loadedRecording !== null
   const isPlayable = next === AppState.Recorded || next === AppState.Playing || next === AppState.Paused
   btnPlayPause.disabled = !hasRecording || !isPlayable
   btnStopPlayback.disabled = next !== AppState.Playing && next !== AppState.Paused
@@ -95,39 +105,42 @@ function textFromHtml(html: string): string {
 }
 
 function mergeRecording(base: Recording, append: Recording): Recording {
+  // Concatenation stays seamless: append's first frame is always a keyframe.
   const frames = [...base.frames, ...append.frames]
-  const lastFrame = frames[frames.length - 1]
-  const firstLine = textFromHtml(lastFrame.v).split('\n')[0].trim()
-  return {
-    version: 1,
+  const merged: Recording = {
+    version: 2,
     meta: {
-      title: firstLine.slice(0, 80),
+      title: base.meta.title,
       createdAt: base.meta.createdAt,
       durationMs: base.meta.durationMs + append.meta.durationMs,
       frameCount: frames.length,
     },
     frames,
   }
+  const firstLine = textFromHtml(lastFrameHtml(merged)).split('\n')[0].trim()
+  merged.meta.title = firstLine.slice(0, 80)
+  return merged
 }
 
 function wrapV1AsDocument(recording: Recording): GraphineDocument {
   const id = crypto.randomUUID()
   return {
-    version: 2,
+    version: 3,
     tabs: [{
       id,
       name: recording.meta.title ? recording.meta.title.slice(0, 20) : 'Tab 1',
-      editorHtml: recording.frames.at(-1)?.v ?? '',
-      recording,
+      editorHtml: lastFrameHtml(recording),
+      recording: null,
     }],
     activeTabId: id,
+    sessionRecording: recording,
   }
 }
 
 function buildDocumentPayload(): GraphineDocument {
   activeTab().editorHtml = writeArea.innerHTML
   return {
-    version: 2,
+    version: 3,
     tabs: tabs.map(t => ({
       id: t.id,
       name: t.name,
@@ -136,6 +149,8 @@ function buildDocumentPayload(): GraphineDocument {
       fontFamily: t.fontFamily,
     })),
     activeTabId: activeTab().id,
+    sessionRecording,
+    sessionStartTabId: sessionStartTabId ?? undefined,
   }
 }
 
@@ -157,31 +172,34 @@ async function doSave(): Promise<void> {
   const tab = activeTab()
   const newRecording = recorder.stop()
 
-  let tabRecording: Recording | null = tab.loadedRecording
-  if (tab.pendingPartialRecording) {
-    tabRecording = tabRecording
-      ? mergeRecording(tabRecording, tab.pendingPartialRecording)
-      : tab.pendingPartialRecording
+  // Build session recording (spans all tabs; used for playback)
+  const prevSessionRecording = sessionRecording
+  if (newRecording.frames.length > 0) {
+    sessionRecording = prevSessionRecording
+      ? mergeRecording(prevSessionRecording, newRecording)
+      : newRecording
   }
+
+  // Per-tab recording (backward compat for single-tab scenarios)
+  let tabRecording: Recording | null = tab.loadedRecording
   if (newRecording.frames.length > 0) {
     tabRecording = tabRecording
       ? mergeRecording(tabRecording, newRecording)
       : newRecording
   }
 
-  const hasAnyContent = tabRecording !== null
+  const hasAnyContent = sessionRecording !== null
+    || tabRecording !== null
     || tabs.some((t, i) => i !== activeTabIndex && t.loadedRecording !== null)
   if (!hasAnyContent) {
     showToast('Nothing recorded yet', 'error')
-    recorder.start()
+    recorder.resume()
     return
   }
 
   // Temporarily update tab for payload building; revert on failure
   const prevLoaded = tab.loadedRecording
-  const prevPending = tab.pendingPartialRecording
   tab.loadedRecording = tabRecording
-  tab.pendingPartialRecording = null
   tab.editorHtml = writeArea.innerHTML
 
   const json = JSON.stringify(buildDocumentPayload(), null, 2)
@@ -193,7 +211,7 @@ async function doSave(): Promise<void> {
       transition(AppState.Recorded)
       showToast(`Saved to ${currentFilePath.split('/').pop()}`)
     } else {
-      const refRecording = tabRecording ?? tabs.find(t => t.loadedRecording !== null)?.loadedRecording
+      const refRecording = sessionRecording ?? tabRecording ?? tabs.find(t => t.loadedRecording !== null)?.loadedRecording
       const defaultName = refRecording
         ? buildDefaultName(refRecording.meta.createdAt)
         : 'graphine-document.grph'
@@ -204,16 +222,17 @@ async function doSave(): Promise<void> {
         transition(AppState.Recorded)
         showToast(`Saved to ${savedPath.split('/').pop()}`)
       } else {
+        // Save dialog cancelled — keep recording so nothing typed is lost.
+        sessionRecording = prevSessionRecording
         tab.loadedRecording = prevLoaded
-        tab.pendingPartialRecording = prevPending
-        recorder.start()
+        recorder.resume()
       }
     }
   } catch {
+    sessionRecording = prevSessionRecording
     tab.loadedRecording = prevLoaded
-    tab.pendingPartialRecording = prevPending
     showToast('Failed to save recording', 'error')
-    recorder.start()
+    recorder.resume()
   }
 }
 
@@ -233,7 +252,7 @@ async function doOpen(): Promise<void> {
   try {
     result = await window.electronAPI.openRecording()
   } catch (err) {
-    showToast(err instanceof Error ? err.message : 'Failed to open recording', 'error')
+    showToast(err instanceof Error ? err.message : 'Failed to open file', 'error')
     return
   }
   if (!result) return
@@ -242,25 +261,34 @@ async function doOpen(): Promise<void> {
     const data = JSON.parse(result.content) as { version?: unknown; frames?: unknown; tabs?: unknown }
 
     let doc: GraphineDocument
+    let loadedSession: Recording | null = null
     if (data.version === 1 && Array.isArray(data.frames)) {
       doc = wrapV1AsDocument(data as Recording)
-    } else if (data.version === 2 && Array.isArray(data.tabs)) {
+      loadedSession = doc.sessionRecording
+    } else if (data.version === 3 && Array.isArray(data.tabs)) {
       doc = data as GraphineDocument
+      loadedSession = doc.sessionRecording ?? null
+    } else if (data.version === 2 && Array.isArray(data.tabs)) {
+      const d = data as { tabs: Tab[]; activeTabId: string }
+      doc = { version: 3, tabs: d.tabs, activeTabId: d.activeTabId, sessionRecording: null }
+      loadedSession = null
     } else {
       showToast('Invalid recording file', 'error')
       return
     }
 
+    sessionRecording = loadedSession
+    sessionStartTabId = (doc as GraphineDocument).sessionStartTabId ?? null
     currentFilePath = result.filePath
     tabs = doc.tabs.map(t => ({
       id: t.id,
       name: t.name,
       editorHtml: t.editorHtml,
-      state: t.recording ? AppState.Recorded : AppState.Idle,
+      state: (t.recording !== null || loadedSession !== null) ? AppState.Recorded : AppState.Idle,
       loadedRecording: t.recording,
-      pendingPartialRecording: null,
       fontSizeRem: 1.2,
       pendingFontSize: null,
+      pendingFontFamily: null,
       savedRange: null,
       fontFamily: t.fontFamily ?? 'serif',
     }))
@@ -272,9 +300,10 @@ async function doOpen(): Promise<void> {
     writeArea.innerHTML = tab.editorHtml
     replayArea.innerHTML = ''
 
-    if (tab.loadedRecording) {
-      player.load(tab.loadedRecording)
-      updateProgress(0, tab.loadedRecording.frames.length)
+    const toLoad = sessionRecording ?? tab.loadedRecording
+    if (toLoad) {
+      player.load(toLoad, sessionStartTabId ?? undefined)
+      updateProgress(0, toLoad.frames.length)
     }
 
     renderTabBar(tabs, activeTab().id, docTabBar, tabBarCallbacks)
@@ -290,8 +319,7 @@ async function doOpen(): Promise<void> {
 }
 
 function doNew(): void {
-  const hasUnsaved = tabs.some(t => t.pendingPartialRecording !== null)
-    || (activeTab().state === AppState.Recording && recorder.frameCount > 0)
+  const hasUnsaved = activeTab().state === AppState.Recording && recorder.frameCount > 0
 
   if (hasUnsaved) {
     if (!confirm('Discard unsaved recording and start a new document?')) return
@@ -301,6 +329,8 @@ function doNew(): void {
   else if (activeTab().state === AppState.Playing || activeTab().state === AppState.Paused) player.stop()
 
   currentFilePath = null
+  sessionRecording = null
+  sessionStartTabId = null
   tabs = [createTab('Tab 1')]
   activeTabIndex = 0
   pendingFontFamily = null
@@ -318,6 +348,13 @@ function doNew(): void {
 }
 
 function doNewTab(): void {
+  // switchActiveTab refuses to leave a recorded/playing/paused tab; creating one
+  // here anyway would push an orphan tab that never renders. Guard up front.
+  const st = activeTab().state
+  if (st === AppState.Recorded || st === AppState.Playing || st === AppState.Paused) {
+    showToast('Finish or start a new document before adding a tab', 'error')
+    return
+  }
   activeTab().editorHtml = writeArea.innerHTML
   activeTab().fontSizeRem = currentFontSizeRem
   const tabNumber = tabs.length + 1
@@ -332,8 +369,7 @@ function doCloseTab(tabId: string): void {
   if (idx === -1) return
 
   const tab = tabs[idx]
-  const isDirty = (idx === activeTabIndex && tab.state === AppState.Recording && recorder.frameCount > 0)
-    || tab.pendingPartialRecording !== null
+  const isDirty = idx === activeTabIndex && tab.state === AppState.Recording && recorder.frameCount > 0
   if (isDirty && !confirm(`Close "${tab.name}" and discard unsaved changes?`)) return
 
   if (idx === activeTabIndex) {
@@ -350,6 +386,7 @@ function doCloseTab(tabId: string): void {
     replayArea.innerHTML = ''
     currentFontSizeRem = incoming.fontSizeRem
     pendingFontSize = incoming.pendingFontSize
+    pendingFontFamily = incoming.pendingFontFamily
     savedRange = incoming.savedRange
     fontSizeInput.value = String(Math.round(currentFontSizeRem * 10))
     syncFontSelect(incoming.fontFamily)
@@ -375,22 +412,17 @@ function switchActiveTab(toIndex: number): void {
 
   const outgoing = activeTab()
 
+  if (outgoing.state === AppState.Recorded || outgoing.state === AppState.Playing || outgoing.state === AppState.Paused) return
+
   if (outgoing.state === AppState.Recording) {
-    const partial = recorder.stop()
-    if (partial.frames.length > 0) {
-      outgoing.pendingPartialRecording = outgoing.pendingPartialRecording
-        ? mergeRecording(outgoing.pendingPartialRecording, partial)
-        : partial
-    }
-    outgoing.state = AppState.Idle
-  } else if (outgoing.state === AppState.Playing || outgoing.state === AppState.Paused) {
-    player.stop()
-    outgoing.state = AppState.Recorded
+    // Capture a tab-switch marker frame and keep the recorder running
+    recorder.captureTabSwitch(tabs[toIndex].id, tabs[toIndex].name)
   }
 
   outgoing.editorHtml = writeArea.innerHTML
   outgoing.fontSizeRem = currentFontSizeRem
   outgoing.pendingFontSize = pendingFontSize
+  outgoing.pendingFontFamily = pendingFontFamily
   outgoing.savedRange = savedRange
   outgoing.fontFamily = fontFamilySelect.value
 
@@ -399,15 +431,22 @@ function switchActiveTab(toIndex: number): void {
 
   writeArea.innerHTML = incoming.editorHtml
   replayArea.innerHTML = ''
+
+  if (outgoing.state === AppState.Recording) {
+    recorder.captureNow(true)  // baseline frame for incoming tab — resets diff anchor
+    incoming.state = AppState.Recording
+  }
   currentFontSizeRem = incoming.fontSizeRem
   pendingFontSize = incoming.pendingFontSize
+  pendingFontFamily = incoming.pendingFontFamily
   savedRange = incoming.savedRange
   fontSizeInput.value = String(Math.round(currentFontSizeRem * 10))
   syncFontSelect(incoming.fontFamily)
 
-  if (incoming.loadedRecording) {
-    player.load(incoming.loadedRecording)
-    updateProgress(0, incoming.loadedRecording.frames.length)
+  const toLoad = sessionRecording ?? incoming.loadedRecording
+  if (toLoad) {
+    player.load(toLoad, sessionStartTabId ?? undefined)
+    updateProgress(0, toLoad.frames.length)
   }
 
   updateReplayAvailable()
@@ -511,8 +550,9 @@ window.electronAPI.onMenuAction((action) => {
 
 writeArea.addEventListener('input', () => {
   if (activeTab().state === AppState.Idle || activeTab().state === AppState.Recorded) {
+    if (sessionRecording === null) sessionStartTabId = activeTab().id
     recorder.start()
-    recorder.captureNow()
+    recorder.captureNow(true)
     transition(AppState.Recording)
   }
 })
@@ -533,6 +573,32 @@ writeArea.addEventListener('keydown', (e: KeyboardEvent) => {
     e.preventDefault()
     document.execCommand('italic')
   }
+})
+
+// Paste as plain text so line breaks become literal '\n' text nodes (matching
+// typed Enter under white-space: pre-wrap) instead of Chromium's default <br>/div
+// HTML — which double-counts breaks on replay (innerText sees both \n and <br>).
+writeArea.addEventListener('paste', (e: ClipboardEvent) => {
+  e.preventDefault()
+  const text = e.clipboardData?.getData('text/plain') ?? ''
+  if (!text) return
+  const normalized = text.replace(/\r\n?/g, '\n')
+
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0) return
+  const range = sel.getRangeAt(0)
+  range.deleteContents()
+
+  const textNode = document.createTextNode(normalized)
+  range.insertNode(textNode)
+
+  const newRange = document.createRange()
+  newRange.setStart(textNode, normalized.length)
+  newRange.collapse(true)
+  sel.removeAllRanges()
+  sel.addRange(newRange)
+
+  writeArea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertFromPaste' }))
 })
 
 btnStopSave.addEventListener('click', doSave)
@@ -562,14 +628,30 @@ tabReplay.addEventListener('click', () => switchView('replay'))
 
 // ── Replay controls ───────────────────────────────────────────────────────────
 
+function jumpToStartTab(): void {
+  if (!sessionStartTabId) return
+  const startIdx = tabs.findIndex(t => t.id === sessionStartTabId)
+  if (startIdx === -1 || startIdx === activeTabIndex) return
+  activeTabIndex = startIdx
+  writeArea.innerHTML = activeTab().editorHtml
+  renderTabBar(tabs, activeTab().id, docTabBar, tabBarCallbacks)
+}
+
+// Rewind to the recording's start tab, load it into the player and enter Playing.
+function preparePlaybackFromRecorded(): void {
+  jumpToStartTab()
+  const toPlay = sessionRecording ?? activeTab().loadedRecording
+  if (toPlay) {
+    player.load(toPlay, sessionStartTabId ?? undefined)
+    replayArea.innerHTML = ''
+    updateProgress(0, toPlay.frames.length)
+  }
+  transition(AppState.Playing)
+}
+
 btnPlayPause.addEventListener('click', () => {
   if (activeTab().state === AppState.Recorded) {
-    if (activeTab().loadedRecording) {
-      player.load(activeTab().loadedRecording!)
-      replayArea.innerHTML = ''
-      updateProgress(0, activeTab().loadedRecording!.frames.length)
-    }
-    transition(AppState.Playing)
+    preparePlaybackFromRecorded()
     player.play()
   } else if (activeTab().state === AppState.Playing) {
     player.pause()
@@ -586,11 +668,8 @@ btnStopPlayback.addEventListener('click', () => {
 })
 
 btnSkipEnd.addEventListener('click', () => {
-  if (activeTab().state === AppState.Recorded && activeTab().loadedRecording) {
-    player.load(activeTab().loadedRecording!)
-    replayArea.innerHTML = ''
-    updateProgress(0, activeTab().loadedRecording!.frames.length)
-    transition(AppState.Playing)
+  if (activeTab().state === AppState.Recorded) {
+    preparePlaybackFromRecorded()
   }
   player.skipToEnd()
 })
@@ -600,7 +679,9 @@ btnSkipEnd.addEventListener('click', () => {
 btnBold.addEventListener('mousedown', (e) => { e.preventDefault(); document.execCommand('bold') })
 btnItalic.addEventListener('mousedown', (e) => { e.preventDefault(); document.execCommand('italic') })
 
-fontFamilySelect.addEventListener('mousedown', () => {
+// Remember the current write-area selection before a toolbar control steals focus,
+// and paint an overlay so the user still sees what they had selected.
+function captureToolbarSelection(): void {
   const sel = window.getSelection()
   if (sel && sel.rangeCount > 0) {
     const range = sel.getRangeAt(0)
@@ -609,7 +690,9 @@ fontFamilySelect.addEventListener('mousedown', () => {
       showSelectionOverlay()
     }
   }
-})
+}
+
+fontFamilySelect.addEventListener('mousedown', captureToolbarSelection)
 
 fontFamilySelect.addEventListener('change', () => {
   const key = fontFamilySelect.value
@@ -659,16 +742,7 @@ function clearSelectionOverlay(): void {
   selectionOverlays = []
 }
 
-fontSizeInput.addEventListener('mousedown', () => {
-  const sel = window.getSelection()
-  if (sel && sel.rangeCount > 0) {
-    const range = sel.getRangeAt(0)
-    if (writeArea.contains(range.commonAncestorContainer)) {
-      savedRange = range.cloneRange()
-      showSelectionOverlay()
-    }
-  }
-})
+fontSizeInput.addEventListener('mousedown', captureToolbarSelection)
 
 fontSizeInput.addEventListener('focus', () => fontSizeInput.select())
 
@@ -682,19 +756,29 @@ function restoreWriteAreaCursor(): void {
   }
 }
 
+// restoreWriteAreaCursor() moves focus to the write area, which synchronously fires
+// this input's blur handler. Suppress the blur-driven apply during that hand-off so
+// the size isn't applied twice (which would nest spans and emit a stray capture).
+let suppressBlurApply = false
+
 fontSizeInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     e.preventDefault()
     const val = parseInt(fontSizeInput.value, 10)
+    suppressBlurApply = true
     restoreWriteAreaCursor()
+    suppressBlurApply = false
     if (!isNaN(val)) applyFontSize(val / 10)
   } else if (e.key === 'Escape') {
     fontSizeInput.value = String(Math.round(currentFontSizeRem * 10))
+    suppressBlurApply = true
     restoreWriteAreaCursor()
+    suppressBlurApply = false
   }
 })
 fontSizeInput.addEventListener('blur', () => {
   clearSelectionOverlay()
+  if (suppressBlurApply) return
   const val = parseInt(fontSizeInput.value, 10)
   if (!isNaN(val)) applyFontSize(val / 10)
   else fontSizeInput.value = String(Math.round(currentFontSizeRem * 10))

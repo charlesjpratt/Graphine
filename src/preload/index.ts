@@ -12,9 +12,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   writeToPath: (filePath: string, json: string): Promise<void> =>
     ipcRenderer.invoke('file:write', filePath, json),
 
-  showInFolder: (filePath: string): Promise<void> =>
-    ipcRenderer.invoke('shell:showItemInFolder', filePath),
-
   onMenuAction: (callback: (action: string) => void): (() => void) => {
     const handler = (_e: Electron.IpcRendererEvent, action: string) => callback(action)
     ipcRenderer.on('menu:action', handler)

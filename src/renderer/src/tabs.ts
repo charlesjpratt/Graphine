@@ -8,9 +8,9 @@ export function createTab(name?: string): TabRuntime {
     editorHtml: '',
     state: AppState.Idle,
     loadedRecording: null,
-    pendingPartialRecording: null,
     fontSizeRem: 1.2,
     pendingFontSize: null,
+    pendingFontFamily: null,
     savedRange: null,
     fontFamily: 'serif',
   }

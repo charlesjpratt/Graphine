@@ -534,6 +534,19 @@ body[data-view="replay"] #minimap-wrap {
 
 body[data-state="recorded"] #write-area { opacity: 0.45; }
 
+body[data-state="recorded"] .doc-tab:not([aria-selected="true"]),
+body[data-state="playing"] .doc-tab:not([aria-selected="true"]),
+body[data-state="paused"] .doc-tab:not([aria-selected="true"]) {
+  opacity: 0.35;
+  pointer-events: none;
+}
+body[data-state="recorded"] #btn-add-tab,
+body[data-state="playing"] #btn-add-tab,
+body[data-state="paused"] #btn-add-tab {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
 /* ── Inline formatting ── */
 #write-area b, #write-area strong,
 #replay-area b, #replay-area strong { font-weight: bold; }

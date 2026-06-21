@@ -1,10 +1,12 @@
-import type { Recording } from './types'
+import type { Frame, Recording } from './types'
+import { buildDelta } from './frameCodec'
 
 export class Recorder {
   private el: HTMLElement
-  private frames: { t: number; v: string }[] = []
+  private frames: Frame[] = []
   private startTime = 0
   private lastEventTime = 0
+  private lastHtml = ''
   private handler: (() => void) | null = null
 
   constructor(el: HTMLElement) {
@@ -13,28 +15,60 @@ export class Recorder {
 
   start(): void {
     this.frames = []
+    this.lastHtml = ''
     this.startTime = Date.now()
     this.lastEventTime = this.startTime
+    this.attach()
+  }
 
+  // Re-attach the input listener without clearing already-captured frames or
+  // resetting startTime — used to keep a recording alive after a cancelled/failed save.
+  resume(): void {
+    if (this.handler) return
+    this.lastEventTime = Date.now()
+    this.attach()
+  }
+
+  private attach(): void {
     this.handler = () => {
       const now = Date.now()
       const html = this.el.innerHTML
-      const last = this.frames[this.frames.length - 1]
-      if (last && last.v === html) {
+      if (this.frames.length > 0 && html === this.lastHtml) {
         this.lastEventTime = now
         return
       }
-      const delta = this.frames.length === 0 ? 0 : now - this.lastEventTime
-      this.frames.push({ t: delta, v: html })
+      // First frame is a self-contained keyframe; later frames are deltas.
+      const frame: Frame = this.frames.length === 0
+        ? { t: 0, v: html }
+        : { t: now - this.lastEventTime, d: buildDelta(this.lastHtml, html) }
+      this.frames.push(frame)
+      this.lastHtml = html
       this.lastEventTime = now
     }
 
     this.el.addEventListener('input', this.handler)
   }
 
-  captureNow(): void {
-    this.frames.push({ t: 0, v: this.el.innerHTML })
+  captureNow(baseline = false): void {
+    const html = this.el.innerHTML
+    const frame: Frame = { t: 0, v: html }
+    if (baseline) frame.baseline = true
+    this.frames.push(frame)
+    this.lastHtml = html
     this.lastEventTime = Date.now()
+  }
+
+  captureTabSwitch(toTabId: string, toTabName: string): void {
+    const now = Date.now()
+    const html = this.el.innerHTML
+    const delta = this.frames.length === 0 ? 0 : now - this.lastEventTime
+    this.frames.push({ t: delta, v: html, tabSwitch: { toTabId, toTabName } })
+    this.lastHtml = html
+    this.lastEventTime = now
+  }
+
+  get isRecording(): boolean {
+    return this.handler !== null
   }
 
   stop(): Recording {
@@ -47,7 +81,7 @@ export class Recorder {
     const firstLine = (this.el.textContent ?? '').split('\n')[0].trim()
 
     return {
-      version: 1,
+      version: 2,
       meta: {
         title: firstLine.slice(0, 80),
         createdAt: new Date(this.startTime).toISOString(),
@@ -64,6 +98,7 @@ export class Recorder {
       this.handler = null
     }
     this.frames = []
+    this.lastHtml = ''
   }
 
   get frameCount(): number {

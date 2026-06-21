@@ -1,25 +1,44 @@
-import { app, BrowserWindow, ipcMain, dialog, Menu, MenuItem, shell } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, Menu, MenuItem } from 'electron'
 import { join } from 'path'
 import { writeFile, readFile } from 'fs/promises'
 import { createHmac, timingSafeEqual } from 'crypto'
 
 const HMAC_SECRET = 'graphine-integrity-v1'
 
+type SignedDoc = Record<string, unknown> & { version?: number; hmac?: string }
+
+// Sign the entire document (every field except hmac itself) so the replay timeline —
+// which for v3 files lives in sessionRecording, not tabs — is covered.
+function fullHmac(obj: SignedDoc): string {
+  const { hmac: _hmac, ...rest } = obj
+  void _hmac
+  return createHmac('sha256', HMAC_SECRET).update(JSON.stringify(rest)).digest('hex')
+}
+
+// Earlier builds signed only obj.tabs / obj.frames. Kept so files saved by those
+// builds still open; new saves always use fullHmac.
+function legacyHmac(obj: SignedDoc): string {
+  const payload = (obj.version === 2 || obj.version === 3) ? obj.tabs : obj.frames
+  return createHmac('sha256', HMAC_SECRET).update(JSON.stringify(payload)).digest('hex')
+}
+
 function addHmac(json: string): string {
-  const obj = JSON.parse(json) as { version?: number; hmac?: string; frames?: unknown[]; tabs?: unknown[] }
-  const payload = obj.version === 2 ? obj.tabs : obj.frames
-  obj.hmac = createHmac('sha256', HMAC_SECRET).update(JSON.stringify(payload)).digest('hex')
+  const obj = JSON.parse(json) as SignedDoc
+  obj.hmac = fullHmac(obj)
   return JSON.stringify(obj, null, 2)
 }
 
-function verifyAndStrip(json: string): string {
-  const obj = JSON.parse(json) as { version?: number; hmac?: string; frames?: unknown[]; tabs?: unknown[] }
-  if (!obj.hmac) throw new Error('Recording has no integrity signature')
-  const payload = obj.version === 2 ? obj.tabs : obj.frames
-  const expected = createHmac('sha256', HMAC_SECRET).update(JSON.stringify(payload)).digest('hex')
-  const a = Buffer.from(obj.hmac, 'hex')
+function matches(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided, 'hex')
   const b = Buffer.from(expected, 'hex')
-  if (a.length !== b.length || !timingSafeEqual(a, b))
+  return a.length === b.length && timingSafeEqual(a, b)
+}
+
+function verifyAndStrip(json: string): string {
+  const obj = JSON.parse(json) as SignedDoc
+  // Legacy/unsigned files (saved before integrity signatures existed) load as-is.
+  if (!obj.hmac) return json
+  if (!matches(obj.hmac, fullHmac(obj)) && !matches(obj.hmac, legacyHmac(obj)))
     throw new Error('Recording integrity check failed — file may have been modified')
   delete obj.hmac
   return JSON.stringify(obj, null, 2)
@@ -78,7 +97,7 @@ function buildMenu(): void {
   }))
   fileMenu.append(new MenuItem({ type: 'separator' }))
   fileMenu.append(new MenuItem({
-    label: 'Open Recording…',
+    label: 'Open File…',
     accelerator: 'CmdOrCtrl+O',
     click: () => mainWindow?.webContents.send('menu:action', 'open'),
   }))
@@ -175,7 +194,7 @@ ipcMain.handle('dialog:save', async (_e, json: string, defaultName: string) => {
 ipcMain.handle('dialog:open', async () => {
   if (!mainWindow) return null
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
-    title: 'Open Recording',
+    title: 'Open File',
     filters: [
       { name: 'Graphine Recording', extensions: ['grph'] },
       { name: 'All Files', extensions: ['*'] },
@@ -190,10 +209,6 @@ ipcMain.handle('dialog:open', async () => {
 
 ipcMain.handle('file:write', async (_e, filePath: string, json: string) => {
   await writeFile(filePath, addHmac(json), 'utf8')
-})
-
-ipcMain.handle('shell:showItemInFolder', (_e, filePath: string) => {
-  shell.showItemInFolder(filePath)
 })
 
 // ── App lifecycle ─────────────────────────────────────────────────────────────

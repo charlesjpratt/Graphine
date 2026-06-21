@@ -1,4 +1,5 @@
 import type { Recording, PlaybackOptions } from './types'
+import { frameToHtml } from './frameCodec'
 
 // ── Char history ──────────────────────────────────────────────────────────────
 
@@ -139,12 +140,16 @@ export class Player {
   private progressCb: ((index: number, total: number) => void) | null = null
   private completeCb: (() => void) | null = null
   private statsCb: ((typed: number, pasted: number, overwrite: number) => void) | null = null
+  private tabSwitchCb: ((toTabId: string, toTabName: string) => void) | null = null
   private history: CharEntry[] = []
   private prevActiveText = ''
   private pendingOverwrite = false
   private overwriteBalance = 0
   private pendingOverwriteMaxCount = 0
   private pasteGroupCounter = 0
+  private tabHistories = new Map<string, { history: CharEntry[]; prevText: string }>()
+  private currentTabId: string | null = null
+  private reconstructedHtml = ''
 
   constructor(el: HTMLElement, options: PlaybackOptions) {
     this.el = el
@@ -155,8 +160,7 @@ export class Player {
     this.options = { ...this.options, ...options }
   }
 
-  load(recording: Recording): void {
-    this.frames = recording.frames
+  private resetState(): void {
     this.cursor = 0
     this.elapsedAtPause = 0
     this.history = []
@@ -165,6 +169,15 @@ export class Player {
     this.overwriteBalance = 0
     this.pendingOverwriteMaxCount = 0
     this.pasteGroupCounter = 0
+    this.tabHistories = new Map()
+    this.currentTabId = null
+    this.reconstructedHtml = ''
+  }
+
+  load(recording: Recording, startTabId?: string): void {
+    this.frames = recording.frames
+    this.resetState()
+    this.currentTabId = startTabId ?? null
 
     let acc = 0
     this.cumulativeDelays = this.frames.map((f) => {
@@ -192,7 +205,16 @@ export class Player {
       this.timeoutId = null
     }
     while (this.cursor < this.frames.length) {
-      this.prevActiveText = this.applyFrame(this.frames[this.cursor].v).text
+      const frame = this.frames[this.cursor]
+      this.reconstructedHtml = frameToHtml(frame, this.reconstructedHtml)
+      if (frame.baseline) {
+        this.applyBaseline(this.reconstructedHtml)
+      } else {
+        this.prevActiveText = this.applyFrame(this.reconstructedHtml).text
+        if (frame.tabSwitch) {
+          this.handleTabSwitch(frame.tabSwitch.toTabId, frame.tabSwitch.toTabName)
+        }
+      }
       this.cursor++
     }
     this.el.innerHTML = renderHistory(this.history)
@@ -206,14 +228,7 @@ export class Player {
       clearTimeout(this.timeoutId)
       this.timeoutId = null
     }
-    this.cursor = 0
-    this.elapsedAtPause = 0
-    this.history = []
-    this.prevActiveText = ''
-    this.pendingOverwrite = false
-    this.overwriteBalance = 0
-    this.pendingOverwriteMaxCount = 0
-    this.pasteGroupCounter = 0
+    this.resetState()
     this.el.innerHTML = ''
     this.statsCb?.(0, 0, 0)
     this.progressCb?.(0, this.frames.length)
@@ -231,6 +246,10 @@ export class Player {
     this.statsCb = cb
   }
 
+  onTabSwitch(cb: (toTabId: string, toTabName: string) => void): void {
+    this.tabSwitchCb = cb
+  }
+
   private emitStats(): void {
     if (!this.statsCb) return
     let typed = 0, pasted = 0, overwrite = 0
@@ -240,6 +259,60 @@ export class Player {
       else overwrite++
     }
     this.statsCb(typed, pasted, overwrite)
+  }
+
+  private applyBaseline(html: string): void {
+    const { text, styles } = htmlToTextAndStyles(html)
+    this.pendingOverwrite = false
+    this.overwriteBalance = 0
+    this.pendingOverwriteMaxCount = 0
+    this.prevActiveText = text
+
+    if (this.history.length === 0) {
+      this.history = Array.from(text).map((char, i) => ({
+        char, type: 'typed' as CharType, fontFamily: styles[i] || undefined,
+      }))
+      return
+    }
+
+    const currentText = this.history.map(e => e.char).join('')
+    if (text === currentText) {
+      for (let i = 0; i < this.history.length; i++) {
+        this.history[i].fontFamily = styles[i] || undefined
+      }
+      return
+    }
+
+    // Reconcile baseline against history: preserve existing char types, add new chars as typed
+    const { prefixLen, prevSuffix, currSuffix } = diffText(currentText, text)
+    const deletedCount = prevSuffix - prefixLen
+    const addedText = text.slice(prefixLen, currSuffix)
+    if (deletedCount > 0) this.history.splice(prefixLen, deletedCount)
+    if (addedText.length > 0) {
+      const entries: CharEntry[] = Array.from(addedText).map((char, i) => ({
+        char, type: 'typed' as CharType, fontFamily: styles[prefixLen + i] || undefined,
+      }))
+      this.history.splice(prefixLen, 0, ...entries)
+    }
+    for (let i = 0; i < this.history.length; i++) {
+      this.history[i].fontFamily = styles[i] || undefined
+    }
+  }
+
+  private handleTabSwitch(toTabId: string, toTabName: string): void {
+    if (this.currentTabId !== null) {
+      this.tabHistories.set(this.currentTabId, {
+        history: this.history.map(e => ({ ...e })),
+        prevText: this.prevActiveText,
+      })
+    }
+    this.currentTabId = toTabId
+    const saved = this.tabHistories.get(toTabId)
+    if (saved) {
+      this.history = saved.history.map(e => ({ ...e }))
+      this.prevActiveText = saved.prevText
+    }
+    this.tabSwitchCb?.(toTabId, toTabName)
   }
 
   private applyFrame(currHtml: string): { text: string; fontsChanged: boolean } {
@@ -330,12 +403,23 @@ export class Player {
     const delay = Math.max(0, expectedElapsed - actualElapsed)
 
     this.timeoutId = setTimeout(() => {
-      const oldText = this.prevActiveText
-      const { text: newText, fontsChanged } = this.applyFrame(this.frames[this.cursor].v)
-      this.prevActiveText = newText
-      if (newText !== oldText || fontsChanged) {
+      const frame = this.frames[this.cursor]
+      this.reconstructedHtml = frameToHtml(frame, this.reconstructedHtml)
+      if (frame.baseline) {
+        this.applyBaseline(this.reconstructedHtml)
         this.el.innerHTML = renderHistory(this.history)
         this.emitStats()
+      } else {
+        const oldText = this.prevActiveText
+        const { text: newText, fontsChanged } = this.applyFrame(this.reconstructedHtml)
+        this.prevActiveText = newText
+        if (newText !== oldText || fontsChanged) {
+          this.el.innerHTML = renderHistory(this.history)
+          this.emitStats()
+        }
+        if (frame.tabSwitch) {
+          this.handleTabSwitch(frame.tabSwitch.toTabId, frame.tabSwitch.toTabName)
+        }
       }
       this.cursor++
       this.progressCb?.(this.cursor, this.frames.length)

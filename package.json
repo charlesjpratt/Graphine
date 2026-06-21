@@ -1,6 +1,6 @@
 {
   "name": "graphine",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Keystroke recording and playback writing app",
   "main": "out/main/index.js",
   "scripts": {
@@ -8,11 +8,12 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "dist": "electron-vite build && electron-builder",
-    "dist:dir": "electron-vite build && electron-builder --dir"
+    "dist:dir": "electron-vite build && electron-builder --dir",
+    "dist:win": "electron-vite build && electron-builder --win --x64"
   },
   "build": {
     "appId": "com.charlespratt.graphine",
-    "productName": "Graphine",
+    "productName": "graphine",
     "directories": {
       "output": "dist",
       "buildResources": "build"
@@ -31,8 +32,18 @@
         { "x": 410, "y": 220, "type": "link", "path": "/Applications" }
       ]
     },
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
     "fileAssociations": [
-      { "ext": "grph", "name": "Graphine Recording" }
+      { "ext": "grph", "name": "graphine Recording" }
     ]
   },
   "devDependencies": {

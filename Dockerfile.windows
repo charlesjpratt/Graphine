@@ -1,0 +1,10 @@
+FROM electronuserland/builder:wine
+
+WORKDIR /project
+
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+
+RUN npm run dist:win
