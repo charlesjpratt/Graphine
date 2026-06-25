@@ -7,22 +7,40 @@ import type { Frame, FrameDelta, Recording } from './types'
 // frame of a recording and for baseline/tab-switch frames; everything else is a
 // small delta. This keeps a large paste stored once instead of once per edit frame.
 
-// Common-prefix/suffix diff: p = shared prefix length, r = chars removed after the
-// prefix, i = inserted substring. Reconstruct via prev.slice(0,p) + i + prev.slice(p+r).
-export function buildDelta(prevHtml: string, currHtml: string): FrameDelta {
-  let p = 0
-  while (p < prevHtml.length && p < currHtml.length && prevHtml[p] === currHtml[p]) p++
-  let prevEnd = prevHtml.length
-  let currEnd = currHtml.length
-  while (prevEnd > p && currEnd > p && prevHtml[prevEnd - 1] === currHtml[currEnd - 1]) {
+// Common-prefix/suffix diff. prefixLen = shared leading chars; prevEnd/currEnd mark
+// where the shared trailing run begins in each string. The changed span is
+// prev[prefixLen..prevEnd) replaced by curr[prefixLen..currEnd).
+export function diffRange(
+  prev: string,
+  curr: string,
+): { prefixLen: number; prevEnd: number; currEnd: number } {
+  let prefixLen = 0
+  while (prefixLen < prev.length && prefixLen < curr.length && prev[prefixLen] === curr[prefixLen]) {
+    prefixLen++
+  }
+  let prevEnd = prev.length
+  let currEnd = curr.length
+  while (prevEnd > prefixLen && currEnd > prefixLen && prev[prevEnd - 1] === curr[currEnd - 1]) {
     prevEnd--
     currEnd--
   }
-  return { p, r: prevEnd - p, i: currHtml.slice(p, currEnd) }
+  return { prefixLen, prevEnd, currEnd }
+}
+
+// p = shared prefix length, r = chars removed after the prefix, i = inserted substring.
+// Reconstruct via prev.slice(0,p) + i + prev.slice(p+r).
+export function buildDelta(prevHtml: string, currHtml: string): FrameDelta {
+  const { prefixLen, prevEnd, currEnd } = diffRange(prevHtml, currHtml)
+  return { p: prefixLen, r: prevEnd - prefixLen, i: currHtml.slice(prefixLen, currEnd) }
 }
 
 export function applyDelta(prevHtml: string, d: FrameDelta): string {
   return prevHtml.slice(0, d.p) + d.i + prevHtml.slice(d.p + d.r)
+}
+
+// A recording's title is its first non-empty line, capped at 80 chars.
+export function titleFromText(text: string): string {
+  return text.split('\n')[0].trim().slice(0, 80)
 }
 
 // Reconstruct a frame's full HTML given the previously reconstructed HTML.

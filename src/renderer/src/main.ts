@@ -5,7 +5,7 @@ import { AppState } from './types'
 import type { Recording, Tab, TabRuntime, GraphineDocument } from './types'
 import { createTab, renderTabBar, startRename } from './tabs'
 import { setupMinimap } from './minimap'
-import { lastFrameHtml } from './frameCodec'
+import { lastFrameHtml, titleFromText } from './frameCodec'
 
 const writeArea = document.getElementById('write-area') as HTMLDivElement
 const writeScroll = document.getElementById('write-scroll') as HTMLDivElement
@@ -48,6 +48,9 @@ const player = new Player(replayArea, { speedMultiplier: 1, maxGapMs: 3000 })
 
 let tabs: TabRuntime[] = [createTab('Tab 1')]
 let activeTabIndex = 0
+// Monotonic counter for default tab names so closing a middle tab can't produce
+// a later collision (e.g. two "Tab 3"s). Reset on New, bumped past opened docs.
+let tabSeq = 1
 let currentFilePath: string | null = null
 let sessionRecording: Recording | null = null
 let sessionStartTabId: string | null = null
@@ -117,8 +120,7 @@ function mergeRecording(base: Recording, append: Recording): Recording {
     },
     frames,
   }
-  const firstLine = textFromHtml(lastFrameHtml(merged)).split('\n')[0].trim()
-  merged.meta.title = firstLine.slice(0, 80)
+  merged.meta.title = titleFromText(textFromHtml(lastFrameHtml(merged)))
   return merged
 }
 
@@ -159,11 +161,10 @@ const tabBarCallbacks = {
   onClose: (tabId: string) => doCloseTab(tabId),
   onRename: (tabId: string, labelEl: HTMLSpanElement) => {
     startRename(tabId, labelEl, (id, newName) => {
+      // startRename has already swapped the label DOM to show newName; we only
+      // need to persist it onto the tab model here.
       const t = tabs.find(t => t.id === id)
-      if (t) {
-        t.name = newName
-        // Re-render so the tab shows the new name even if renderTabBar isn't called
-      }
+      if (t) t.name = newName
     })
   },
 }
@@ -293,6 +294,8 @@ async function doOpen(): Promise<void> {
       fontFamily: t.fontFamily ?? 'serif',
     }))
 
+    tabSeq = Math.max(tabSeq, tabs.length)
+
     const activeIdx = tabs.findIndex(t => t.id === doc.activeTabId)
     activeTabIndex = activeIdx >= 0 ? activeIdx : 0
 
@@ -332,8 +335,16 @@ function doNew(): void {
   sessionRecording = null
   sessionStartTabId = null
   tabs = [createTab('Tab 1')]
+  tabSeq = 1
   activeTabIndex = 0
+
+  // Reset all font/selection state to the fresh tab's defaults, matching what
+  // switchActiveTab/doCloseTab do when moving between tabs.
+  currentFontSizeRem = activeTab().fontSizeRem
+  pendingFontSize = null
   pendingFontFamily = null
+  savedRange = null
+  fontSizeInput.value = String(Math.round(currentFontSizeRem * 10))
 
   writeArea.innerHTML = ''
   replayArea.innerHTML = ''
@@ -357,8 +368,7 @@ function doNewTab(): void {
   }
   activeTab().editorHtml = writeArea.innerHTML
   activeTab().fontSizeRem = currentFontSizeRem
-  const tabNumber = tabs.length + 1
-  tabs.push(createTab(`Tab ${tabNumber}`))
+  tabs.push(createTab(`Tab ${++tabSeq}`))
   switchActiveTab(tabs.length - 1)
 }
 
@@ -373,7 +383,9 @@ function doCloseTab(tabId: string): void {
   if (isDirty && !confirm(`Close "${tab.name}" and discard unsaved changes?`)) return
 
   if (idx === activeTabIndex) {
-    const targetIdx = idx > 0 ? idx - 1 : 1
+    // After splice every later tab shifts left by one, so closing the first tab
+    // (idx 0) should land on the new index 0; otherwise prefer the left neighbour.
+    const targetIdx = idx > 0 ? idx - 1 : 0
 
     if (tab.state === AppState.Recording) recorder.reset()
     else if (tab.state === AppState.Playing || tab.state === AppState.Paused) player.stop()
@@ -548,14 +560,20 @@ window.electronAPI.onMenuAction((action) => {
 
 // ── Write controls ────────────────────────────────────────────────────────────
 
-writeArea.addEventListener('input', () => {
-  if (activeTab().state === AppState.Idle || activeTab().state === AppState.Recorded) {
-    if (sessionRecording === null) sessionStartTabId = activeTab().id
-    recorder.start()
-    recorder.captureNow(true)
-    transition(AppState.Recording)
-  }
-})
+// Begin a recording segment if one isn't already running, capturing the editor's
+// CURRENT content as the baseline keyframe. Call this BEFORE mutating the DOM so the
+// mutation that follows records as its own delta frame rather than being folded into
+// the baseline (which would replay as plain typed text).
+function ensureRecordingStarted(): void {
+  const st = activeTab().state
+  if (st !== AppState.Idle && st !== AppState.Recorded) return
+  if (sessionRecording === null) sessionStartTabId = activeTab().id
+  recorder.start()
+  recorder.captureNow(true)
+  transition(AppState.Recording)
+}
+
+writeArea.addEventListener('input', ensureRecordingStarted)
 
 writeArea.addEventListener('keydown', (e: KeyboardEvent) => {
   if ((pendingFontSize !== null || pendingFontFamily !== null) && !e.metaKey && !e.ctrlKey && !e.altKey && e.key.length === 1) {
@@ -583,6 +601,11 @@ writeArea.addEventListener('paste', (e: ClipboardEvent) => {
   const text = e.clipboardData?.getData('text/plain') ?? ''
   if (!text) return
   const normalized = text.replace(/\r\n?/g, '\n')
+
+  // Establish the baseline from the pre-paste content first, so the paste below records
+  // as its own delta frame and replays as 'pasted' (yellow). Without this, the generic
+  // input listener would snapshot the post-paste DOM as the baseline → plain typed text.
+  ensureRecordingStarted()
 
   const sel = window.getSelection()
   if (!sel || sel.rangeCount === 0) return

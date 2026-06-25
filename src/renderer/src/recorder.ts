@@ -1,5 +1,5 @@
 import type { Frame, Recording } from './types'
-import { buildDelta } from './frameCodec'
+import { buildDelta, titleFromText } from './frameCodec'
 
 export class Recorder {
   private el: HTMLElement
@@ -78,12 +78,11 @@ export class Recorder {
     }
 
     const durationMs = this.frames.length > 0 ? Date.now() - this.startTime : 0
-    const firstLine = (this.el.textContent ?? '').split('\n')[0].trim()
 
     return {
       version: 2,
       meta: {
-        title: firstLine.slice(0, 80),
+        title: titleFromText(this.el.textContent ?? ''),
         createdAt: new Date(this.startTime).toISOString(),
         durationMs,
         frameCount: this.frames.length,

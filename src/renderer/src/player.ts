@@ -1,5 +1,5 @@
 import type { Recording, PlaybackOptions } from './types'
-import { frameToHtml } from './frameCodec'
+import { frameToHtml, diffRange } from './frameCodec'
 
 // ── Char history ──────────────────────────────────────────────────────────────
 
@@ -24,7 +24,12 @@ function overwriteColor(count: number): string {
 function styleKey(entry: CharEntry): string {
   const f = entry.fontFamily ? `:f:${entry.fontFamily}` : ''
   if (entry.type === 'typed') return f ? `t${f}` : ''
-  if (entry.type === 'overwrite') return `ow:${Math.min(entry.overwriteCount ?? 1, 4)}${f}`
+  if (entry.type === 'overwrite') {
+    // pasteGroup keeps a pasted-overwrite run boxed as one unit, separate from adjacent
+    // typed-overwrite chars at the same depth.
+    const pg = entry.pasteGroup != null ? `:pg:${entry.pasteGroup}` : ''
+    return `ow:${Math.min(entry.overwriteCount ?? 1, 4)}${pg}${f}`
+  }
   return `paste:${entry.pasteGroup}${f}`
 }
 
@@ -76,23 +81,12 @@ function htmlToTextAndStyles(html: string): { text: string; styles: string[] } {
   return { text, styles: fonts.slice(0, text.length) }
 }
 
-function diffText(prev: string, curr: string): { prefixLen: number; prevSuffix: number; currSuffix: number } {
-  let prefixLen = 0
-  while (prefixLen < prev.length && prefixLen < curr.length && prev[prefixLen] === curr[prefixLen]) {
-    prefixLen++
-  }
-  let prevEnd = prev.length
-  let currEnd = curr.length
-  while (prevEnd > prefixLen && currEnd > prefixLen && prev[prevEnd - 1] === curr[currEnd - 1]) {
-    prevEnd--
-    currEnd--
-  }
-  return { prefixLen, prevSuffix: prevEnd, currSuffix: currEnd }
-}
-
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
+
+// The yellow outline that marks pasted text; shared by plain pastes and pasted overwrites.
+const PASTE_BOX = 'border:1px solid #fef08a;border-radius:2px;padding:0 2px;box-decoration-break:clone;-webkit-box-decoration-break:clone'
 
 function openSpanFor(entry: CharEntry): string {
   // CSSOM normalizes 'Courier New' → "Courier New"; replace back to single quotes so
@@ -100,10 +94,12 @@ function openSpanFor(entry: CharEntry): string {
   const ff = entry.fontFamily?.replace(/"/g, "'") ?? ''
   const fontStyle = ff ? `font-family:${ff};` : ''
   if (entry.type === 'overwrite') {
-    return `<span style="${fontStyle}color:${overwriteColor(entry.overwriteCount ?? 1)}">`
+    // Overwrite is red; if it also came from a paste, add the yellow box around it.
+    const box = entry.pasteGroup != null ? `;${PASTE_BOX}` : ''
+    return `<span style="${fontStyle}color:${overwriteColor(entry.overwriteCount ?? 1)}${box}">`
   }
   if (entry.type === 'pasted') {
-    return `<span style="${fontStyle}color:#fef08a;border:1px solid #fef08a;border-radius:2px;padding:0 2px;box-decoration-break:clone;-webkit-box-decoration-break:clone">`
+    return `<span style="${fontStyle}color:#fef08a;${PASTE_BOX}">`
   }
   return `<span style="${fontStyle}">`
 }
@@ -284,9 +280,9 @@ export class Player {
     }
 
     // Reconcile baseline against history: preserve existing char types, add new chars as typed
-    const { prefixLen, prevSuffix, currSuffix } = diffText(currentText, text)
-    const deletedCount = prevSuffix - prefixLen
-    const addedText = text.slice(prefixLen, currSuffix)
+    const { prefixLen, prevEnd, currEnd } = diffRange(currentText, text)
+    const deletedCount = prevEnd - prefixLen
+    const addedText = text.slice(prefixLen, currEnd)
     if (deletedCount > 0) this.history.splice(prefixLen, deletedCount)
     if (addedText.length > 0) {
       const entries: CharEntry[] = Array.from(addedText).map((char, i) => ({
@@ -317,11 +313,11 @@ export class Player {
 
   private applyFrame(currHtml: string): { text: string; fontsChanged: boolean } {
     const { text: currText, styles: currStyles } = htmlToTextAndStyles(currHtml)
-    const { prefixLen, prevSuffix, currSuffix } = diffText(this.prevActiveText, currText)
+    const { prefixLen, prevEnd, currEnd } = diffRange(this.prevActiveText, currText)
 
-    const deletedCount = prevSuffix - prefixLen
-    const addedText = currText.slice(prefixLen, currSuffix)
-    const deletedNonNl = this.prevActiveText.slice(prefixLen, prevSuffix).replace(/\n/g, '').length
+    const deletedCount = prevEnd - prefixLen
+    const addedText = currText.slice(prefixLen, currEnd)
+    const deletedNonNl = this.prevActiveText.slice(prefixLen, prevEnd).replace(/\n/g, '').length
     const addedNonNl = addedText.replace(/\n/g, '')
 
     // Capture overwrite counts from positions about to be removed
@@ -342,7 +338,11 @@ export class Player {
     const pendingOverwrite = this.pendingOverwrite && deletedNonNl === 0 && addedNonNl.length > 0
     const isOverwrite = directOverwrite || pendingOverwrite
 
-    const addType: CharType = isOverwrite ? 'overwrite' : addedNonNl.length > 1 ? 'pasted' : 'typed'
+    // A bulk insert (>1 non-newline char in one frame) is a paste. It stays an
+    // 'overwrite' when it also deleted text — but we still tag the paste so it gets the
+    // yellow box, signalling "an overwrite that was pasted".
+    const wasPasted = addedNonNl.length > 1
+    const addType: CharType = isOverwrite ? 'overwrite' : wasPasted ? 'pasted' : 'typed'
 
     // Capture base count before spend-down can reset pendingOverwriteMaxCount
     const baseCount = directOverwrite ? deletedMaxCount : this.pendingOverwriteMaxCount
@@ -374,7 +374,7 @@ export class Player {
 
     if (addedText.length > 0) {
       const overwriteCount = isOverwrite ? baseCount + 1 : undefined
-      const pasteGroup = addType === 'pasted' ? ++this.pasteGroupCounter : undefined
+      const pasteGroup = wasPasted ? ++this.pasteGroupCounter : undefined
       const entries: CharEntry[] = Array.from(addedText).map((char) => ({
         char, type: addType, pasteGroup, overwriteCount,
       }))
