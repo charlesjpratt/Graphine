@@ -19,6 +19,9 @@ function fullHmac(obj: SignedDoc): string {
 // builds still open; new saves always use fullHmac.
 function legacyHmac(obj: SignedDoc): string {
   const payload = (obj.version === 2 || obj.version === 3) ? obj.tabs : obj.frames
+  // No legacy payload to sign (hand-edited/malformed file) — return a value that
+  // can never match rather than letting JSON.stringify(undefined) crash update().
+  if (payload === undefined) return ''
   return createHmac('sha256', HMAC_SECRET).update(JSON.stringify(payload)).digest('hex')
 }
 
@@ -76,6 +79,9 @@ function createWindow(): void {
   })
   mainWindow.webContents.on('did-finish-load', () => {
     mainWindow?.webContents.send('window:fullscreen', mainWindow.isFullScreen())
+  })
+  mainWindow.on('closed', () => {
+    mainWindow = null
   })
 
   buildMenu()

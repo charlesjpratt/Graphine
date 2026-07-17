@@ -63,6 +63,5 @@ export interface TabRuntime {
   fontSizeRem: number
   pendingFontSize: number | null
   pendingFontFamily: string | null
-  savedRange: Range | null
   fontFamily: string
 }

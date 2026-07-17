@@ -5,7 +5,7 @@ import { AppState } from './types'
 import type { Recording, Tab, TabRuntime, GraphineDocument } from './types'
 import { createTab, renderTabBar, startRename } from './tabs'
 import { setupMinimap } from './minimap'
-import { lastFrameHtml, titleFromText } from './frameCodec'
+import { basename, buildDefaultName, mergeRecording, wrapV1AsDocument } from './document'
 
 const writeArea = document.getElementById('write-area') as HTMLDivElement
 const writeScroll = document.getElementById('write-scroll') as HTMLDivElement
@@ -65,8 +65,17 @@ player.onComplete(() => {
 })
 player.onTabSwitch((toTabId) => {
   const idx = tabs.findIndex(t => t.id === toTabId)
-  if (idx === -1) return
+  if (idx === -1 || idx === activeTabIndex) return
+  // Keep writeArea and toolbar state in sync with the active tab even when playback
+  // drives the switch — otherwise the next save copies the wrong tab's HTML into
+  // the new active tab. The playing/paused state travels with the active tab; the
+  // tab left behind is playable (a session recording exists), hence Recorded.
+  const playState = activeTab().state
+  activeTab().state = AppState.Recorded
+  saveActiveTabRuntime()
   activeTabIndex = idx
+  restoreActiveTabRuntime()
+  activeTab().state = playState
   renderTabBar(tabs, toTabId, docTabBar, tabBarCallbacks)
 })
 
@@ -95,48 +104,29 @@ function transition(next: AppState): void {
   }
 }
 
-function buildDefaultName(createdAt: string): string {
-  const d = new Date(createdAt)
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `graphine-${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.grph`
+// Persist the active tab's editor content and toolbar state onto its TabRuntime.
+function saveActiveTabRuntime(): void {
+  const tab = activeTab()
+  tab.editorHtml = writeArea.innerHTML
+  tab.fontSizeRem = currentFontSizeRem
+  tab.pendingFontSize = pendingFontSize
+  tab.pendingFontFamily = pendingFontFamily
+  tab.fontFamily = fontFamilySelect.value
 }
 
-function textFromHtml(html: string): string {
-  const tmp = document.createElement('div')
-  tmp.innerHTML = html
-  return tmp.textContent ?? ''
-}
-
-function mergeRecording(base: Recording, append: Recording): Recording {
-  // Concatenation stays seamless: append's first frame is always a keyframe.
-  const frames = [...base.frames, ...append.frames]
-  const merged: Recording = {
-    version: 2,
-    meta: {
-      title: base.meta.title,
-      createdAt: base.meta.createdAt,
-      durationMs: base.meta.durationMs + append.meta.durationMs,
-      frameCount: frames.length,
-    },
-    frames,
-  }
-  merged.meta.title = titleFromText(textFromHtml(lastFrameHtml(merged)))
-  return merged
-}
-
-function wrapV1AsDocument(recording: Recording): GraphineDocument {
-  const id = crypto.randomUUID()
-  return {
-    version: 3,
-    tabs: [{
-      id,
-      name: recording.meta.title ? recording.meta.title.slice(0, 20) : 'Tab 1',
-      editorHtml: lastFrameHtml(recording),
-      recording: null,
-    }],
-    activeTabId: id,
-    sessionRecording: recording,
-  }
+// Load the active tab's editor content and toolbar state into the DOM and globals.
+// Any saved selection Range points into DOM the innerHTML swap just detached, so
+// it is always dropped rather than carried across tabs.
+function restoreActiveTabRuntime(): void {
+  const tab = activeTab()
+  writeArea.innerHTML = tab.editorHtml
+  currentFontSizeRem = tab.fontSizeRem
+  pendingFontSize = tab.pendingFontSize
+  pendingFontFamily = tab.pendingFontFamily
+  savedRange = null
+  clearSelectionOverlay()
+  fontSizeInput.value = String(Math.round(currentFontSizeRem * 10))
+  syncFontSelect(tab.fontFamily)
 }
 
 function buildDocumentPayload(): GraphineDocument {
@@ -171,11 +161,15 @@ const tabBarCallbacks = {
 
 async function doSave(): Promise<void> {
   const tab = activeTab()
-  const newRecording = recorder.stop()
+  // Only consume the recorder while it's live. stop() deliberately leaves frames in
+  // place so a cancelled save can resume(); calling it again after a successful save
+  // would return the same frames and merge the whole segment into the recording twice.
+  const wasRecording = recorder.isRecording
+  const newRecording = wasRecording ? recorder.stop() : null
 
   // Build session recording (spans all tabs; used for playback)
   const prevSessionRecording = sessionRecording
-  if (newRecording.frames.length > 0) {
+  if (newRecording && newRecording.frames.length > 0) {
     sessionRecording = prevSessionRecording
       ? mergeRecording(prevSessionRecording, newRecording)
       : newRecording
@@ -183,7 +177,7 @@ async function doSave(): Promise<void> {
 
   // Per-tab recording (backward compat for single-tab scenarios)
   let tabRecording: Recording | null = tab.loadedRecording
-  if (newRecording.frames.length > 0) {
+  if (newRecording && newRecording.frames.length > 0) {
     tabRecording = tabRecording
       ? mergeRecording(tabRecording, newRecording)
       : newRecording
@@ -194,7 +188,7 @@ async function doSave(): Promise<void> {
     || tabs.some((t, i) => i !== activeTabIndex && t.loadedRecording !== null)
   if (!hasAnyContent) {
     showToast('Nothing recorded yet', 'error')
-    recorder.resume()
+    if (wasRecording) recorder.resume()
     return
   }
 
@@ -210,7 +204,7 @@ async function doSave(): Promise<void> {
       await window.electronAPI.writeToPath(currentFilePath, json)
       updateReplayAvailable()
       transition(AppState.Recorded)
-      showToast(`Saved to ${currentFilePath.split('/').pop()}`)
+      showToast(`Saved to ${basename(currentFilePath)}`)
     } else {
       const refRecording = sessionRecording ?? tabRecording ?? tabs.find(t => t.loadedRecording !== null)?.loadedRecording
       const defaultName = refRecording
@@ -221,19 +215,19 @@ async function doSave(): Promise<void> {
         currentFilePath = savedPath
         updateReplayAvailable()
         transition(AppState.Recorded)
-        showToast(`Saved to ${savedPath.split('/').pop()}`)
+        showToast(`Saved to ${basename(savedPath)}`)
       } else {
         // Save dialog cancelled — keep recording so nothing typed is lost.
         sessionRecording = prevSessionRecording
         tab.loadedRecording = prevLoaded
-        recorder.resume()
+        if (wasRecording) recorder.resume()
       }
     }
   } catch {
     sessionRecording = prevSessionRecording
     tab.loadedRecording = prevLoaded
     showToast('Failed to save recording', 'error')
-    recorder.resume()
+    if (wasRecording) recorder.resume()
   }
 }
 
@@ -241,9 +235,11 @@ async function doOpen(): Promise<void> {
   if (activeTab().state === AppState.Recording && recorder.frameCount > 0) {
     const save = confirm('Save current recording before opening?')
     if (save) {
+      // doSave fully awaits the native dialog and the disk write, so if we're no
+      // longer in Recording state the save either succeeded or there was nothing
+      // to save — safe to continue straight into the open dialog.
       await doSave()
       if (activeTab().state === AppState.Recording) return
-      await new Promise<void>(resolve => setTimeout(resolve, 400))
     } else {
       recorder.reset()
     }
@@ -290,7 +286,6 @@ async function doOpen(): Promise<void> {
       fontSizeRem: 1.2,
       pendingFontSize: null,
       pendingFontFamily: null,
-      savedRange: null,
       fontFamily: t.fontFamily ?? 'serif',
     }))
 
@@ -338,20 +333,11 @@ function doNew(): void {
   tabSeq = 1
   activeTabIndex = 0
 
-  // Reset all font/selection state to the fresh tab's defaults, matching what
-  // switchActiveTab/doCloseTab do when moving between tabs.
-  currentFontSizeRem = activeTab().fontSizeRem
-  pendingFontSize = null
-  pendingFontFamily = null
-  savedRange = null
-  fontSizeInput.value = String(Math.round(currentFontSizeRem * 10))
-
-  writeArea.innerHTML = ''
+  restoreActiveTabRuntime()
   replayArea.innerHTML = ''
   writeArea.contentEditable = 'true'
   writeArea.focus()
 
-  syncFontSelect(activeTab().fontFamily)
   renderTabBar(tabs, activeTab().id, docTabBar, tabBarCallbacks)
   updateReplayAvailable()
   switchView('write')
@@ -366,8 +352,6 @@ function doNewTab(): void {
     showToast('Finish or start a new document before adding a tab', 'error')
     return
   }
-  activeTab().editorHtml = writeArea.innerHTML
-  activeTab().fontSizeRem = currentFontSizeRem
   tabs.push(createTab(`Tab ${++tabSeq}`))
   switchActiveTab(tabs.length - 1)
 }
@@ -394,14 +378,8 @@ function doCloseTab(tabId: string): void {
     activeTabIndex = Math.min(targetIdx, tabs.length - 1)
 
     const incoming = activeTab()
-    writeArea.innerHTML = incoming.editorHtml
+    restoreActiveTabRuntime()
     replayArea.innerHTML = ''
-    currentFontSizeRem = incoming.fontSizeRem
-    pendingFontSize = incoming.pendingFontSize
-    pendingFontFamily = incoming.pendingFontFamily
-    savedRange = incoming.savedRange
-    fontSizeInput.value = String(Math.round(currentFontSizeRem * 10))
-    syncFontSelect(incoming.fontFamily)
 
     if (incoming.loadedRecording) {
       player.load(incoming.loadedRecording)
@@ -431,29 +409,17 @@ function switchActiveTab(toIndex: number): void {
     recorder.captureTabSwitch(tabs[toIndex].id, tabs[toIndex].name)
   }
 
-  outgoing.editorHtml = writeArea.innerHTML
-  outgoing.fontSizeRem = currentFontSizeRem
-  outgoing.pendingFontSize = pendingFontSize
-  outgoing.pendingFontFamily = pendingFontFamily
-  outgoing.savedRange = savedRange
-  outgoing.fontFamily = fontFamilySelect.value
-
+  saveActiveTabRuntime()
   activeTabIndex = toIndex
   const incoming = activeTab()
 
-  writeArea.innerHTML = incoming.editorHtml
+  restoreActiveTabRuntime()
   replayArea.innerHTML = ''
 
   if (outgoing.state === AppState.Recording) {
     recorder.captureNow(true)  // baseline frame for incoming tab — resets diff anchor
     incoming.state = AppState.Recording
   }
-  currentFontSizeRem = incoming.fontSizeRem
-  pendingFontSize = incoming.pendingFontSize
-  pendingFontFamily = incoming.pendingFontFamily
-  savedRange = incoming.savedRange
-  fontSizeInput.value = String(Math.round(currentFontSizeRem * 10))
-  syncFontSelect(incoming.fontFamily)
 
   const toLoad = sessionRecording ?? incoming.loadedRecording
   if (toLoad) {
@@ -497,6 +463,24 @@ function insertCharWithStyles(char: string, sizeRem: number | null, fontFamilyKe
   writeArea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
 }
 
+// Wrap a selection range in a styled span, reselect the wrapped content, and capture
+// a frame if recording. Shared by the font-size and font-family controls.
+function wrapRangeWithStyle(range: Range, prop: 'fontSize' | 'fontFamily', value: string): void {
+  const fragment = range.extractContents()
+  const span = document.createElement('span')
+  span.style[prop] = value
+  span.appendChild(fragment)
+  range.insertNode(span)
+  const newRange = document.createRange()
+  newRange.selectNodeContents(span)
+  const sel = window.getSelection()
+  if (sel) {
+    sel.removeAllRanges()
+    sel.addRange(newRange)
+  }
+  if (activeTab().state === AppState.Recording) recorder.captureNow()
+}
+
 function applyFontSize(targetRem: number): void {
   currentFontSizeRem = Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(targetRem * 10) / 10))
   fontSizeInput.value = String(Math.round(currentFontSizeRem * 10))
@@ -506,16 +490,7 @@ function applyFontSize(targetRem: number): void {
   const inWriteArea = range && writeArea.contains(range.commonAncestorContainer)
 
   if (range && !range.collapsed && inWriteArea) {
-    const fragment = range.extractContents()
-    const span = document.createElement('span')
-    span.style.fontSize = `${currentFontSizeRem}rem`
-    span.appendChild(fragment)
-    range.insertNode(span)
-    const newRange = document.createRange()
-    newRange.selectNodeContents(span)
-    sel!.removeAllRanges()
-    sel!.addRange(newRange)
-    if (activeTab().state === AppState.Recording) recorder.captureNow()
+    wrapRangeWithStyle(range, 'fontSize', `${currentFontSizeRem}rem`)
   } else {
     pendingFontSize = currentFontSizeRem
   }
@@ -655,8 +630,9 @@ function jumpToStartTab(): void {
   if (!sessionStartTabId) return
   const startIdx = tabs.findIndex(t => t.id === sessionStartTabId)
   if (startIdx === -1 || startIdx === activeTabIndex) return
+  saveActiveTabRuntime()
   activeTabIndex = startIdx
-  writeArea.innerHTML = activeTab().editorHtml
+  restoreActiveTabRuntime()
   renderTabBar(tabs, activeTab().id, docTabBar, tabBarCallbacks)
 }
 
@@ -724,16 +700,7 @@ fontFamilySelect.addEventListener('change', () => {
 
   const rangeToUse = savedRange && !savedRange.collapsed ? savedRange : null
   if (rangeToUse) {
-    const fragment = rangeToUse.extractContents()
-    const span = document.createElement('span')
-    span.style.fontFamily = css
-    span.appendChild(fragment)
-    rangeToUse.insertNode(span)
-    const newRange = document.createRange()
-    newRange.selectNodeContents(span)
-    const sel = window.getSelection()
-    if (sel) { sel.removeAllRanges(); sel.addRange(newRange) }
-    if (activeTab().state === AppState.Recording) recorder.captureNow()
+    wrapRangeWithStyle(rangeToUse, 'fontFamily', css)
   } else {
     pendingFontFamily = key
   }

@@ -11,7 +11,6 @@ export function createTab(name?: string): TabRuntime {
     fontSizeRem: 1.2,
     pendingFontSize: null,
     pendingFontFamily: null,
-    savedRange: null,
     fontFamily: 'serif',
   }
 }
