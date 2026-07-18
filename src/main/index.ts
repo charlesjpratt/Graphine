@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, Menu, MenuItem } from 'electron'
 import { join } from 'path'
-import { writeFile, readFile } from 'fs/promises'
-import { createHmac, timingSafeEqual } from 'crypto'
+import { writeFile, readFile, unlink } from 'fs/promises'
+import { createHmac, timingSafeEqual, randomUUID } from 'crypto'
 
 const HMAC_SECRET = 'graphine-integrity-v1'
 
@@ -100,6 +100,11 @@ function buildMenu(): void {
     label: 'Save Recording…',
     accelerator: 'CmdOrCtrl+S',
     click: () => mainWindow?.webContents.send('menu:action', 'save'),
+  }))
+  fileMenu.append(new MenuItem({
+    label: 'Export to PDF…',
+    accelerator: 'CmdOrCtrl+E',
+    click: () => mainWindow?.webContents.send('menu:action', 'export-pdf'),
   }))
   fileMenu.append(new MenuItem({ type: 'separator' }))
   fileMenu.append(new MenuItem({
@@ -215,6 +220,46 @@ ipcMain.handle('dialog:open', async () => {
 
 ipcMain.handle('file:write', async (_e, filePath: string, json: string) => {
   await writeFile(filePath, addHmac(json), 'utf8')
+})
+
+// Render a self-contained HTML document to PDF via an offscreen window so the output
+// contains only the document content (not the app chrome). The PDF is NOT signed —
+// addHmac is JSON-only and would corrupt a binary file.
+ipcMain.handle('dialog:export-pdf', async (_e, html: string, defaultName: string) => {
+  if (!mainWindow) return null
+
+  const pdfWin = new BrowserWindow({
+    show: false,
+    webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false },
+  })
+  // Temp file + loadFile avoids Chromium's data:-URL length limit on large documents.
+  const tmpPath = join(app.getPath('temp'), `graphine-export-${randomUUID()}.html`)
+
+  try {
+    await writeFile(tmpPath, html, 'utf8')
+    await pdfWin.loadFile(tmpPath)
+    // printBackground is required for the yellow paste boxes / colored backgrounds.
+    const buffer = await pdfWin.webContents.printToPDF({
+      printBackground: true,
+      pageSize: 'A4',
+      margins: { marginType: 'default' },
+    })
+
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+      title: 'Export to PDF',
+      defaultPath: defaultName,
+      filters: [
+        { name: 'PDF Document', extensions: ['pdf'] },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+    })
+    if (canceled || !filePath) return null
+    await writeFile(filePath, buffer)
+    return filePath
+  } finally {
+    if (!pdfWin.isDestroyed()) pdfWin.destroy()
+    unlink(tmpPath).catch(() => {})
+  }
 })
 
 // ── App lifecycle ─────────────────────────────────────────────────────────────

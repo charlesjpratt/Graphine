@@ -5,7 +5,7 @@ import { frameToHtml, diffRange } from './frameCodec'
 
 type CharType = 'typed' | 'pasted' | 'overwrite'
 
-interface CharEntry {
+export interface CharEntry {
   char: string  // single char; '\n' renders as <br>
   type: CharType
   pasteGroup?: number
@@ -14,7 +14,7 @@ interface CharEntry {
 }
 
 // pink → red over 4 steps
-const OVERWRITE_COLORS = ['#fda4af', '#fb7185', '#f87171', '#ef4444']
+export const OVERWRITE_COLORS = ['#fda4af', '#fb7185', '#f87171', '#ef4444']
 
 function overwriteColor(count: number): string {
   return OVERWRITE_COLORS[Math.min(count, OVERWRITE_COLORS.length) - 1]
@@ -81,30 +81,38 @@ function htmlToTextAndStyles(html: string): { text: string; styles: string[] } {
   return { text, styles: fonts.slice(0, text.length) }
 }
 
-function escapeHtml(s: string): string {
+export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-// The yellow outline that marks pasted text; shared by plain pastes and pasted overwrites.
-const PASTE_BOX = 'border:1px solid #fef08a;border-radius:2px;padding:0 2px;box-decoration-break:clone;-webkit-box-decoration-break:clone'
+// On-screen pasted text is light yellow (reads well on the dark replay area). The PDF
+// export overrides this with a darker yellow for readability on white — see renderHistory.
+export const SCREEN_PASTE_COLOR = '#fef08a'
 
-function openSpanFor(entry: CharEntry): string {
+// The colored outline that marks pasted text; shared by plain pastes and pasted overwrites.
+function pasteBox(color: string): string {
+  return `border:1px solid ${color};border-radius:2px;padding:0 2px;box-decoration-break:clone;-webkit-box-decoration-break:clone`
+}
+
+function openSpanFor(entry: CharEntry, pasteColor: string): string {
   // CSSOM normalizes 'Courier New' → "Courier New"; replace back to single quotes so
   // the value is safe inside a double-quoted HTML style attribute.
   const ff = entry.fontFamily?.replace(/"/g, "'") ?? ''
   const fontStyle = ff ? `font-family:${ff};` : ''
   if (entry.type === 'overwrite') {
     // Overwrite is red; if it also came from a paste, add the yellow box around it.
-    const box = entry.pasteGroup != null ? `;${PASTE_BOX}` : ''
+    const box = entry.pasteGroup != null ? `;${pasteBox(pasteColor)}` : ''
     return `<span style="${fontStyle}color:${overwriteColor(entry.overwriteCount ?? 1)}${box}">`
   }
   if (entry.type === 'pasted') {
-    return `<span style="${fontStyle}color:#fef08a;${PASTE_BOX}">`
+    return `<span style="${fontStyle}color:${pasteColor};${pasteBox(pasteColor)}">`
   }
   return `<span style="${fontStyle}">`
 }
 
-function renderHistory(history: CharEntry[]): string {
+// pasteColor lets callers (the PDF export) substitute a darker, print-readable yellow
+// while live replay uses the default light yellow.
+export function renderHistory(history: CharEntry[], pasteColor: string = SCREEN_PASTE_COLOR): string {
   let html = ''
   let openKey = ''
 
@@ -113,7 +121,7 @@ function renderHistory(history: CharEntry[]): string {
     if (key !== openKey) {
       if (openKey) html += '</span>'
       openKey = key
-      if (key) html += openSpanFor(entry)
+      if (key) html += openSpanFor(entry, pasteColor)
     }
     html += entry.char === '\n' ? '<br>' : escapeHtml(entry.char)
   }
@@ -154,6 +162,12 @@ export class Player {
 
   setOptions(options: Partial<PlaybackOptions>): void {
     this.options = { ...this.options, ...options }
+  }
+
+  // Snapshot of the current end-of-replay char history. Used by the PDF export to
+  // reproduce the exact colored state after a load()+skipToEnd() on a throwaway Player.
+  getHistory(): CharEntry[] {
+    return this.history.map((e) => ({ ...e }))
   }
 
   private resetState(): void {

@@ -1,11 +1,13 @@
 import { Recorder } from './recorder'
 import { Player } from './player'
+import { buildExportHtml } from './pdfExport'
 import { switchView, applyState, updateProgress, showToast, setupInactivityHiding, updateStats } from './ui'
 import { AppState } from './types'
 import type { Recording, Tab, TabRuntime, GraphineDocument } from './types'
 import { createTab, renderTabBar, startRename } from './tabs'
 import { setupMinimap } from './minimap'
-import { basename, buildDefaultName, mergeRecording, wrapV1AsDocument } from './document'
+import { basename, buildDefaultName, mergeRecording, textFromHtml, wrapV1AsDocument } from './document'
+import { lastFrameHtml, titleFromText } from './frameCodec'
 
 const writeArea = document.getElementById('write-area') as HTMLDivElement
 const writeScroll = document.getElementById('write-scroll') as HTMLDivElement
@@ -316,6 +318,35 @@ async function doOpen(): Promise<void> {
   }
 }
 
+async function doExportPdf(): Promise<void> {
+  // Active-document scope: prefer the tab's own recording; fall back to the session.
+  const tabRec = activeTab().loadedRecording
+  const rec = tabRec ?? sessionRecording
+  if (!rec) {
+    showToast('Save or record before exporting', 'error')
+    return
+  }
+
+  // Reproduce the exact end-of-replay colored state via a throwaway Player on a
+  // detached element, so the PDF matches what the replay shows.
+  const scratch = document.createElement('div')
+  const exporter = new Player(scratch, { speedMultiplier: 1, maxGapMs: 3000 })
+  exporter.load(rec, tabRec ? undefined : (sessionStartTabId ?? undefined))
+  exporter.skipToEnd()
+  const history = exporter.getHistory()
+
+  const title = rec.meta.title || titleFromText(textFromHtml(lastFrameHtml(rec))) || 'Untitled document'
+  const safeName = (title || 'graphine-document').replace(/[/\\:*?"<>|]/g, '-').slice(0, 80)
+  const html = buildExportHtml([{ history }], { title, createdAt: rec.meta.createdAt })
+
+  try {
+    const saved = await window.electronAPI.exportPdf(html, `${safeName}.pdf`)
+    if (saved) showToast(`Exported to ${saved.split('/').pop()}`)
+  } catch {
+    showToast('Failed to export PDF', 'error')
+  }
+}
+
 function doNew(): void {
   const hasUnsaved = activeTab().state === AppState.Recording && recorder.frameCount > 0
 
@@ -525,6 +556,7 @@ window.electronAPI.onMenuAction((action) => {
   switch (action) {
     case 'save': doSave(); break
     case 'open': doOpen(); break
+    case 'export-pdf': doExportPdf(); break
     case 'new': doNew(); break
     case 'view:write': switchView('write'); break
     case 'view:replay': switchView('replay'); break
