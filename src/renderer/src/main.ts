@@ -6,8 +6,8 @@ import { AppState } from './types'
 import type { Recording, Tab, TabRuntime, GraphineDocument } from './types'
 import { createTab, renderTabBar, startRename } from './tabs'
 import { setupMinimap } from './minimap'
-import { basename, buildDefaultName, mergeRecording, textFromHtml, wrapV1AsDocument } from './document'
-import { lastFrameHtml, titleFromText } from './frameCodec'
+import { basename, buildDefaultName, mergeRecording, wrapV1AsDocument } from './document'
+import { titleFromText } from './frameCodec'
 
 const writeArea = document.getElementById('write-area') as HTMLDivElement
 const writeScroll = document.getElementById('write-scroll') as HTMLDivElement
@@ -319,8 +319,10 @@ async function doOpen(): Promise<void> {
 }
 
 async function doExportPdf(): Promise<void> {
-  // Active-document scope: prefer the tab's own recording; fall back to the session.
-  const tabRec = activeTab().loadedRecording
+  // Export is scoped to the active tab: its own recording, or its slice of the
+  // session recording — never another tab's content, even when this tab is blank.
+  const tab = activeTab()
+  const tabRec = tab.loadedRecording
   const rec = tabRec ?? sessionRecording
   if (!rec) {
     showToast('Save or record before exporting', 'error')
@@ -328,15 +330,19 @@ async function doExportPdf(): Promise<void> {
   }
 
   // Reproduce the exact end-of-replay colored state via a throwaway Player on a
-  // detached element, so the PDF matches what the replay shows.
+  // detached element, so the PDF matches what the replay shows. Legacy documents
+  // may lack sessionStartTabId; attribute the session start to the active tab then.
   const scratch = document.createElement('div')
   const exporter = new Player(scratch, { speedMultiplier: 1, maxGapMs: 3000 })
-  exporter.load(rec, tabRec ? undefined : (sessionStartTabId ?? undefined))
+  exporter.load(rec, tabRec ? undefined : (sessionStartTabId ?? tab.id))
   exporter.skipToEnd()
-  const history = exporter.getHistory()
+  const history = tabRec ? exporter.getHistory() : exporter.getHistoryForTab(tab.id)
 
-  const title = rec.meta.title || titleFromText(textFromHtml(lastFrameHtml(rec))) || 'Untitled document'
-  const safeName = (title || 'graphine-document').replace(/[/\\:*?"<>|]/g, '-').slice(0, 80)
+  // Derive the title from the exported slice, not the whole recording, so a blank
+  // or partial tab can't pick up another tab's text.
+  const text = history.map(e => e.char).join('')
+  const title = (tabRec ? rec.meta.title : '') || titleFromText(text) || 'Untitled document'
+  const safeName = title.replace(/[/\\:*?"<>|]/g, '-').slice(0, 80)
   const html = buildExportHtml([{ history }], { title, createdAt: rec.meta.createdAt })
 
   try {

@@ -170,6 +170,14 @@ export class Player {
     return this.history.map((e) => ({ ...e }))
   }
 
+  // Per-tab variant: the given tab's end-of-replay history, or [] if the tab never
+  // appeared in the recording. Used by the tab-scoped PDF export.
+  getHistoryForTab(tabId: string): CharEntry[] {
+    if (tabId === this.currentTabId) return this.getHistory()
+    const saved = this.tabHistories.get(tabId)
+    return saved ? saved.history.map((e) => ({ ...e })) : []
+  }
+
   private resetState(): void {
     this.cursor = 0
     this.elapsedAtPause = 0
