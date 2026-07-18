@@ -32,6 +32,7 @@ const btnAddTab = document.getElementById('btn-add-tab') as HTMLButtonElement
 const tabSidebar = document.getElementById('tab-sidebar') as HTMLElement
 const btnSidebarToggle = document.getElementById('btn-sidebar-toggle') as HTMLButtonElement
 const fontFamilySelect = document.getElementById('font-family-select') as HTMLSelectElement
+const btnWordCount = document.getElementById('btn-word-count') as HTMLButtonElement
 
 // ── Font family ───────────────────────────────────────────────────────────────
 
@@ -715,6 +716,14 @@ btnSkipEnd.addEventListener('click', () => {
 
 btnBold.addEventListener('mousedown', (e) => { e.preventDefault(); document.execCommand('bold') })
 btnItalic.addEventListener('mousedown', (e) => { e.preventDefault(); document.execCommand('italic') })
+
+// Keep focus (and the caret) in the write area when checking the word count.
+btnWordCount.addEventListener('mousedown', (e) => e.preventDefault())
+btnWordCount.addEventListener('click', () => {
+  const text = writeArea.innerText.trim()
+  const words = text.length === 0 ? 0 : text.split(/\s+/).length
+  showToast(`${words.toLocaleString()} word${words === 1 ? '' : 's'}`)
+})
 
 // Remember the current write-area selection before a toolbar control steals focus,
 // and paint an overlay so the user still sees what they had selected.
