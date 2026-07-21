@@ -47,46 +47,61 @@ function styleKey(entry: CharEntry): string {
   return `paste:${entry.pasteGroup}${s}`
 }
 
-// Persistent off-screen element — lets the browser handle all paragraph/div/br cases
+// Persistent off-screen element used to parse recorded HTML into a DOM to walk.
 let textExtractor: HTMLDivElement | null = null
 
 interface CharStyle { font: string; align: string; bold: boolean; italic: boolean }
 
+// Parse recorded HTML into the character sequence and per-character style that the replay
+// reconstructs from. We do NOT use innerText: it counts an empty <div><br></div> blank line
+// as two line breaks (block boundary + filler <br>) though it renders as a single blank
+// line, which replays as a doubled paragraph gap. Instead a single DOM walk emits the text
+// and its styles together — always in sync — with exactly one '\n' per on-screen line break.
+//
+// Owed breaks are realized just before the next character, in two kinds:
+//   soft — a block (div/p) boundary: at most one (max-dedup so touching blocks separate by a
+//          single line) and dropped if nothing follows (a trailing boundary is not a row).
+//   hard — a <br>, a literal '\n', or a blank-line block's empty row: additive, and kept even
+//          when trailing (a real blank line at the end still shows).
 function htmlToTextAndStyles(html: string): { text: string; styles: CharStyle[] } {
   if (!textExtractor) {
     textExtractor = document.createElement('div')
     textExtractor.style.cssText = 'position:fixed;opacity:0;white-space:pre-wrap;pointer-events:none;top:-9999px;left:-9999px'
     document.body.appendChild(textExtractor)
   }
-  // Strip trailing <br> Chrome adds as a cursor placeholder in contenteditable, then
-  // remove cursor-placeholder <br>s inside block elements (trailing child with siblings).
-  // A <br> that is the only child of its parent is a real empty-line marker — leave it.
+  // Strip a trailing <br> (Chrome's cursor placeholder) from the end of the HTML, then any
+  // <br> that is the true last node of a block element — also a placeholder, not a real line.
   textExtractor.innerHTML = html.replace(/<br\s*\/?>\s*$/i, '')
   const removeCursorBr = (el: Element): void => {
     for (const child of Array.from(el.children)) removeCursorBr(child)
-    const last = el.lastElementChild
-    if (last?.tagName === 'BR' && el.childNodes.length > 1) last.remove()
+    const last = el.lastChild
+    if (last?.nodeName === 'BR' && el.childNodes.length > 1) (last as Element).remove()
   }
   removeCursorBr(textExtractor)
-  // innerText is authoritative for character sequence (handles br, divs, whitespace)
-  const text = textExtractor.innerText
 
-  // Walk the DOM to collect the font-family, block text-align, and bold/italic in effect
-  // for each character, in lockstep with innerText. Block elements (div/p) contribute a
-  // newline before and after their content; emitBreak() dedupes so adjacent block
-  // boundaries and a leading block don't produce spurious newlines, keeping the styles
-  // array aligned to text.
+  const base: CharStyle = { font: '', align: '', bold: false, italic: false }
+  const chars: string[] = []
   const styles: CharStyle[] = []
-  let lastWasBreak = true  // suppress a leading newline before the first block
-  const emitChar = (s: CharStyle): void => { styles.push(s); lastWasBreak = false }
-  const emitBreak = (s: CharStyle): void => {
-    if (lastWasBreak) return
-    styles.push(s); lastWasBreak = true
+  let emitted = false
+  let pendingSoft = 0
+  let pendingHard = 0
+  let breakStyle = base
+  const flush = (atEnd: boolean): void => {
+    const n = (atEnd ? 0 : pendingSoft) + pendingHard
+    for (let i = 0; i < n; i++) { chars.push('\n'); styles.push(breakStyle) }
+    pendingSoft = 0; pendingHard = 0
   }
+  const addChar = (ch: string, s: CharStyle): void => {
+    if (ch === '\n') { pendingHard++; breakStyle = s; return }
+    flush(false)
+    chars.push(ch); styles.push(s); emitted = true
+  }
+  const softBreak = (s: CharStyle): void => { if (!emitted) return; pendingSoft = 1; breakStyle = s }
+  const hardBreak = (s: CharStyle): void => { pendingHard++; breakStyle = s }
+
   function walk(node: Node, s: CharStyle): void {
     if (node.nodeType === Node.TEXT_NODE) {
-      const len = (node.textContent ?? '').length
-      for (let i = 0; i < len; i++) emitChar(s)
+      for (const ch of node.textContent ?? '') addChar(ch, s)
     } else if (node.nodeType === Node.ELEMENT_NODE) {
       const el = node as HTMLElement
       const tag = el.tagName.toUpperCase()
@@ -103,23 +118,25 @@ function htmlToTextAndStyles(html: string): { text: string; styles: CharStyle[] 
       const nextItalic = s.italic || tag === 'I' || tag === 'EM' || fs === 'italic' || fs === 'oblique'
       const next: CharStyle = { font: nextFont, align: nextAlign, bold: nextBold, italic: nextItalic }
       if (tag === 'BR') {
-        // An explicit <br> is always a line break, even consecutive ones.
-        styles.push(s); lastWasBreak = true
+        hardBreak(s)
       } else if (tag === 'DIV' || tag === 'P') {
-        emitBreak(s)      // block boundary before the block's content
-        for (const child of Array.from(el.childNodes)) walk(child, next)
-        emitBreak(next)   // block boundary after it
+        // A block with no text is a blank line (may hold a filler <br> or inline wrappers):
+        // its boundary is soft, plus one hard break for the empty row it occupies.
+        if (el.textContent === '') {
+          softBreak(next); hardBreak(next)
+        } else {
+          softBreak(next)
+          for (const child of Array.from(el.childNodes)) walk(child, next)
+          softBreak(next)  // separate from any following inline content
+        }
       } else {
         for (const child of Array.from(el.childNodes)) walk(child, next)
       }
     }
   }
-  const base: CharStyle = { font: '', align: '', bold: false, italic: false }
   for (const child of Array.from(textExtractor.childNodes)) walk(child, base)
-
-  // A trailing block break maps past the end of innerText; pad/trim to match its length.
-  while (styles.length < text.length) styles.push({ ...base })
-  return { text, styles: styles.slice(0, text.length) }
+  flush(true)
+  return { text: chars.join(''), styles }
 }
 
 export function escapeHtml(s: string): string {
