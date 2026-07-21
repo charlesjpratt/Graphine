@@ -12,6 +12,8 @@ export interface CharEntry {
   overwriteCount?: number  // 1 = first overwrite, capped display at 4
   fontFamily?: string
   textAlign?: string  // block alignment inherited from the enclosing paragraph/div
+  bold?: boolean      // inside <b>/<strong> or font-weight:bold
+  italic?: boolean    // inside <i>/<em> or font-style:italic
 }
 
 // pink → red over 4 steps
@@ -32,20 +34,25 @@ function overwriteColor(count: number): string {
 // key used to decide when to open/close a <span>
 function styleKey(entry: CharEntry): string {
   const f = entry.fontFamily ? `:f:${entry.fontFamily}` : ''
-  if (entry.type === 'typed') return f ? `t${f}` : ''
+  const b = entry.bold ? ':b' : ''
+  const i = entry.italic ? ':i' : ''
+  const s = `${f}${b}${i}`
+  if (entry.type === 'typed') return s ? `t${s}` : ''
   if (entry.type === 'overwrite') {
     // pasteGroup keeps a pasted-overwrite run boxed as one unit, separate from adjacent
     // typed-overwrite chars at the same depth.
     const pg = entry.pasteGroup != null ? `:pg:${entry.pasteGroup}` : ''
-    return `ow:${Math.min(entry.overwriteCount ?? 1, 4)}${pg}${f}`
+    return `ow:${Math.min(entry.overwriteCount ?? 1, 4)}${pg}${s}`
   }
-  return `paste:${entry.pasteGroup}${f}`
+  return `paste:${entry.pasteGroup}${s}`
 }
 
 // Persistent off-screen element — lets the browser handle all paragraph/div/br cases
 let textExtractor: HTMLDivElement | null = null
 
-function htmlToTextAndStyles(html: string): { text: string; styles: string[]; aligns: string[] } {
+interface CharStyle { font: string; align: string; bold: boolean; italic: boolean }
+
+function htmlToTextAndStyles(html: string): { text: string; styles: CharStyle[] } {
   if (!textExtractor) {
     textExtractor = document.createElement('div')
     textExtractor.style.cssText = 'position:fixed;opacity:0;white-space:pre-wrap;pointer-events:none;top:-9999px;left:-9999px'
@@ -64,53 +71,70 @@ function htmlToTextAndStyles(html: string): { text: string; styles: string[]; al
   // innerText is authoritative for character sequence (handles br, divs, whitespace)
   const text = textExtractor.innerText
 
-  // Walk the DOM to collect the font-family and block text-align in effect for each
-  // character, in lockstep with innerText. Block elements (div/p) contribute a newline
-  // before and after their content; emitBreak() dedupes so adjacent block boundaries and
-  // a leading block don't produce spurious newlines, keeping the arrays aligned to text.
-  const fonts: string[] = []
-  const aligns: string[] = []
+  // Walk the DOM to collect the font-family, block text-align, and bold/italic in effect
+  // for each character, in lockstep with innerText. Block elements (div/p) contribute a
+  // newline before and after their content; emitBreak() dedupes so adjacent block
+  // boundaries and a leading block don't produce spurious newlines, keeping the styles
+  // array aligned to text.
+  const styles: CharStyle[] = []
   let lastWasBreak = true  // suppress a leading newline before the first block
-  const emitChar = (font: string, align: string): void => {
-    fonts.push(font); aligns.push(align); lastWasBreak = false
-  }
-  const emitBreak = (font: string, align: string): void => {
+  const emitChar = (s: CharStyle): void => { styles.push(s); lastWasBreak = false }
+  const emitBreak = (s: CharStyle): void => {
     if (lastWasBreak) return
-    fonts.push(font); aligns.push(align); lastWasBreak = true
+    styles.push(s); lastWasBreak = true
   }
-  function walk(node: Node, font: string, align: string): void {
+  function walk(node: Node, s: CharStyle): void {
     if (node.nodeType === Node.TEXT_NODE) {
       const len = (node.textContent ?? '').length
-      for (let i = 0; i < len; i++) emitChar(font, align)
+      for (let i = 0; i < len; i++) emitChar(s)
     } else if (node.nodeType === Node.ELEMENT_NODE) {
       const el = node as HTMLElement
       const tag = el.tagName.toUpperCase()
-      const nextFont = el.style.fontFamily || font
+      const nextFont = el.style.fontFamily || s.font
       // execCommand emits text-align via inline style (styleWithCSS) or the legacy align
       // attribute; accept either. 'start' is the initial value, i.e. no explicit alignment.
       const rawAlign = el.style.textAlign || el.getAttribute('align') || ''
-      const nextAlign = rawAlign && rawAlign !== 'start' ? rawAlign : align
+      const nextAlign = rawAlign && rawAlign !== 'start' ? rawAlign : s.align
+      // Bold/italic come from <b>/<strong>/<i>/<em> tags (styleWithCSS off, the default) or
+      // the equivalent inline styles (styleWithCSS on); once set they inherit to children.
+      const fw = el.style.fontWeight
+      const nextBold = s.bold || tag === 'B' || tag === 'STRONG' || fw === 'bold' || fw === 'bolder' || parseInt(fw, 10) >= 600
+      const fs = el.style.fontStyle
+      const nextItalic = s.italic || tag === 'I' || tag === 'EM' || fs === 'italic' || fs === 'oblique'
+      const next: CharStyle = { font: nextFont, align: nextAlign, bold: nextBold, italic: nextItalic }
       if (tag === 'BR') {
         // An explicit <br> is always a line break, even consecutive ones.
-        fonts.push(font); aligns.push(align); lastWasBreak = true
+        styles.push(s); lastWasBreak = true
       } else if (tag === 'DIV' || tag === 'P') {
-        emitBreak(font, align)          // block boundary before the block's content
-        for (const child of Array.from(el.childNodes)) walk(child, nextFont, nextAlign)
-        emitBreak(nextFont, nextAlign)  // block boundary after it
+        emitBreak(s)      // block boundary before the block's content
+        for (const child of Array.from(el.childNodes)) walk(child, next)
+        emitBreak(next)   // block boundary after it
       } else {
-        for (const child of Array.from(el.childNodes)) walk(child, nextFont, nextAlign)
+        for (const child of Array.from(el.childNodes)) walk(child, next)
       }
     }
   }
-  for (const child of Array.from(textExtractor.childNodes)) walk(child, '', '')
+  const base: CharStyle = { font: '', align: '', bold: false, italic: false }
+  for (const child of Array.from(textExtractor.childNodes)) walk(child, base)
 
   // A trailing block break maps past the end of innerText; pad/trim to match its length.
-  while (fonts.length < text.length) { fonts.push(''); aligns.push('') }
-  return { text, styles: fonts.slice(0, text.length), aligns: aligns.slice(0, text.length) }
+  while (styles.length < text.length) styles.push({ ...base })
+  return { text, styles: styles.slice(0, text.length) }
 }
 
 export function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+// The style fields of a CharEntry, normalized from a CharStyle (empty/false → undefined so
+// entries stay minimal and equality checks are simple).
+function styleFields(s: CharStyle | undefined): Pick<CharEntry, 'fontFamily' | 'textAlign' | 'bold' | 'italic'> {
+  return {
+    fontFamily: s?.font || undefined,
+    textAlign: s?.align || undefined,
+    bold: s?.bold || undefined,
+    italic: s?.italic || undefined,
+  }
 }
 
 // On-screen pasted text is light yellow (reads well on the dark replay area). The PDF
@@ -126,16 +150,18 @@ function openSpanFor(entry: CharEntry, pasteColor: string): string {
   // CSSOM normalizes 'Courier New' → "Courier New"; replace back to single quotes so
   // the value is safe inside a double-quoted HTML style attribute.
   const ff = entry.fontFamily?.replace(/"/g, "'") ?? ''
-  const fontStyle = ff ? `font-family:${ff};` : ''
+  let css = ff ? `font-family:${ff};` : ''
+  if (entry.bold) css += 'font-weight:bold;'
+  if (entry.italic) css += 'font-style:italic;'
   if (entry.type === 'overwrite') {
     // Overwrite is red; if it also came from a paste, add the yellow box around it.
     const box = entry.pasteGroup != null ? `;${pasteBox(pasteColor)}` : ''
-    return `<span style="${fontStyle}color:${overwriteColor(entry.overwriteCount ?? 1)}${box}">`
+    return `<span style="${css}color:${overwriteColor(entry.overwriteCount ?? 1)}${box}">`
   }
   if (entry.type === 'pasted') {
-    return `<span style="${fontStyle}color:${pasteColor};${pasteBox(pasteColor)}">`
+    return `<span style="${css}color:${pasteColor};${pasteBox(pasteColor)}">`
   }
-  return `<span style="${fontStyle}">`
+  return `<span style="${css}">`
 }
 
 // Renders a run of chars as one continuous inline stream: '\n' → <br>, with color/font
@@ -352,7 +378,7 @@ export class Player {
   }
 
   private applyBaseline(html: string): void {
-    const { text, styles, aligns } = htmlToTextAndStyles(html)
+    const { text, styles } = htmlToTextAndStyles(html)
     this.pendingOverwrite = false
     this.overwriteBalance = 0
     this.pendingOverwriteMaxCount = 0
@@ -360,8 +386,7 @@ export class Player {
 
     if (this.history.length === 0) {
       this.history = Array.from(text).map((char, i) => ({
-        char, type: 'typed' as CharType,
-        fontFamily: styles[i] || undefined, textAlign: aligns[i] || undefined,
+        char, type: 'typed' as CharType, ...styleFields(styles[i]),
       }))
       return
     }
@@ -369,8 +394,7 @@ export class Player {
     const currentText = this.history.map(e => e.char).join('')
     if (text === currentText) {
       for (let i = 0; i < this.history.length; i++) {
-        this.history[i].fontFamily = styles[i] || undefined
-        this.history[i].textAlign = aligns[i] || undefined
+        Object.assign(this.history[i], styleFields(styles[i]))
       }
       return
     }
@@ -382,14 +406,12 @@ export class Player {
     if (deletedCount > 0) this.history.splice(prefixLen, deletedCount)
     if (addedText.length > 0) {
       const entries: CharEntry[] = Array.from(addedText).map((char, i) => ({
-        char, type: 'typed' as CharType,
-        fontFamily: styles[prefixLen + i] || undefined, textAlign: aligns[prefixLen + i] || undefined,
+        char, type: 'typed' as CharType, ...styleFields(styles[prefixLen + i]),
       }))
       this.history.splice(prefixLen, 0, ...entries)
     }
     for (let i = 0; i < this.history.length; i++) {
-      this.history[i].fontFamily = styles[i] || undefined
-      this.history[i].textAlign = aligns[i] || undefined
+      Object.assign(this.history[i], styleFields(styles[i]))
     }
   }
 
@@ -410,7 +432,7 @@ export class Player {
   }
 
   private applyFrame(currHtml: string): { text: string; stylesChanged: boolean } {
-    const { text: currText, styles: currStyles, aligns: currAligns } = htmlToTextAndStyles(currHtml)
+    const { text: currText, styles: currStyles } = htmlToTextAndStyles(currHtml)
     const { prefixLen, prevEnd, currEnd } = diffRange(this.prevActiveText, currText)
 
     const deletedCount = prevEnd - prefixLen
@@ -494,15 +516,16 @@ export class Player {
       this.history.splice(prefixLen, 0, ...entries)
     }
 
-    // Sync font-family and alignment for every char from the current frame — handles
-    // style/alignment changes applied to text that already exists in the history.
+    // Sync font-family, alignment, and bold/italic for every char from the current frame —
+    // handles styling toggled on text that already exists in the history.
     let stylesChanged = false
     for (let i = 0; i < this.history.length; i++) {
-      const nextFont = currStyles[i] || undefined
-      const nextAlign = currAligns[i] || undefined
-      if (this.history[i].fontFamily !== nextFont || this.history[i].textAlign !== nextAlign) stylesChanged = true
-      this.history[i].fontFamily = nextFont
-      this.history[i].textAlign = nextAlign
+      const e = this.history[i]
+      const s = styleFields(currStyles[i])
+      if (e.fontFamily !== s.fontFamily || e.textAlign !== s.textAlign || e.bold !== s.bold || e.italic !== s.italic) {
+        stylesChanged = true
+      }
+      Object.assign(e, s)
     }
 
     return { text: currText, stylesChanged }
