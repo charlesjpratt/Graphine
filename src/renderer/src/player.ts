@@ -16,6 +16,14 @@ export interface CharEntry {
 // pink → red over 4 steps
 export const OVERWRITE_COLORS = ['#fda4af', '#fb7185', '#f87171', '#ef4444']
 
+// Overwrite tracking exists for small backspace-and-retype corrections (delete a
+// typo, type the fix — the fix shows red). A pure deletion larger than this many
+// chars in a single frame — or an accumulated backspace run past it — is a block
+// edit (select-delete, a cut for a move, a drag-move), NOT an overwrite. Past this
+// bound we stop arming overwrite mode so the text typed/pasted afterwards is not
+// mis-coloured red. Sized to still cover deleting a few words.
+const BLOCK_DELETE_THRESHOLD = 24
+
 function overwriteColor(count: number): string {
   return OVERWRITE_COLORS[Math.min(count, OVERWRITE_COLORS.length) - 1]
 }
@@ -348,15 +356,30 @@ export class Player {
       deletedMaxCount = Math.max(deletedMaxCount, this.history[i].overwriteCount ?? 0)
     }
 
-    // Pure deletion: accumulate balance and remember the max overwrite depth
+    // A block-scale deletion in this single frame is a structural edit, not a
+    // char-level overwrite (see BLOCK_DELETE_THRESHOLD).
+    const blockScaleDelete = deletedNonNl > BLOCK_DELETE_THRESHOLD
+
+    // Pure deletion: accumulate balance and remember the max overwrite depth. But a
+    // single large deletion — or a backspace run that accumulates past the block
+    // threshold — is a block delete, not a correction: clear overwrite mode so the
+    // text typed or pasted afterwards replays plain instead of red.
     if (deletedNonNl > 0 && addedNonNl.length === 0) {
-      this.pendingOverwriteMaxCount = Math.max(this.pendingOverwriteMaxCount, deletedMaxCount)
-      this.overwriteBalance += deletedNonNl
-      this.pendingOverwrite = true
+      if (this.overwriteBalance + deletedNonNl > BLOCK_DELETE_THRESHOLD) {
+        this.pendingOverwrite = false
+        this.overwriteBalance = 0
+        this.pendingOverwriteMaxCount = 0
+      } else {
+        this.pendingOverwriteMaxCount = Math.max(this.pendingOverwriteMaxCount, deletedMaxCount)
+        this.overwriteBalance += deletedNonNl
+        this.pendingOverwrite = true
+      }
     }
 
-    // select+type in one frame is always overwrite; pending balance covers backspace+type
-    const directOverwrite = deletedNonNl > 0 && addedNonNl.length > 0
+    // select+type in one frame is always overwrite; pending balance covers backspace+type.
+    // A block-scale replacement (e.g. a drag-move landing in one frame) is excluded so
+    // the relocated text isn't painted red.
+    const directOverwrite = deletedNonNl > 0 && addedNonNl.length > 0 && !blockScaleDelete
     const pendingOverwrite = this.pendingOverwrite && deletedNonNl === 0 && addedNonNl.length > 0
     const isOverwrite = directOverwrite || pendingOverwrite
 
