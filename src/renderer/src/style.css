@@ -138,6 +138,15 @@ body[data-view="replay"] #format-controls {
 #btn-bold { font-size: 14px; font-weight: 700; }
 #btn-italic { font-size: 14px; font-style: italic; font-family: var(--font-write); }
 
+.fmt-icon { padding: 0 6px; }
+.fmt-icon svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
 .fmt-input {
   width: 34px;
   height: 24px;

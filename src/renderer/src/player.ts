@@ -11,6 +11,7 @@ export interface CharEntry {
   pasteGroup?: number
   overwriteCount?: number  // 1 = first overwrite, capped display at 4
   fontFamily?: string
+  textAlign?: string  // block alignment inherited from the enclosing paragraph/div
 }
 
 // pink → red over 4 steps
@@ -44,7 +45,7 @@ function styleKey(entry: CharEntry): string {
 // Persistent off-screen element — lets the browser handle all paragraph/div/br cases
 let textExtractor: HTMLDivElement | null = null
 
-function htmlToTextAndStyles(html: string): { text: string; styles: string[] } {
+function htmlToTextAndStyles(html: string): { text: string; styles: string[]; aligns: string[] } {
   if (!textExtractor) {
     textExtractor = document.createElement('div')
     textExtractor.style.cssText = 'position:fixed;opacity:0;white-space:pre-wrap;pointer-events:none;top:-9999px;left:-9999px'
@@ -63,30 +64,49 @@ function htmlToTextAndStyles(html: string): { text: string; styles: string[] } {
   // innerText is authoritative for character sequence (handles br, divs, whitespace)
   const text = textExtractor.innerText
 
-  // Walk DOM to collect font-family per character
+  // Walk the DOM to collect the font-family and block text-align in effect for each
+  // character, in lockstep with innerText. Block elements (div/p) contribute a newline
+  // before and after their content; emitBreak() dedupes so adjacent block boundaries and
+  // a leading block don't produce spurious newlines, keeping the arrays aligned to text.
   const fonts: string[] = []
-  function walk(node: Node, font: string): void {
+  const aligns: string[] = []
+  let lastWasBreak = true  // suppress a leading newline before the first block
+  const emitChar = (font: string, align: string): void => {
+    fonts.push(font); aligns.push(align); lastWasBreak = false
+  }
+  const emitBreak = (font: string, align: string): void => {
+    if (lastWasBreak) return
+    fonts.push(font); aligns.push(align); lastWasBreak = true
+  }
+  function walk(node: Node, font: string, align: string): void {
     if (node.nodeType === Node.TEXT_NODE) {
       const len = (node.textContent ?? '').length
-      for (let i = 0; i < len; i++) fonts.push(font)
+      for (let i = 0; i < len; i++) emitChar(font, align)
     } else if (node.nodeType === Node.ELEMENT_NODE) {
       const el = node as HTMLElement
       const tag = el.tagName.toUpperCase()
       const nextFont = el.style.fontFamily || font
+      // execCommand emits text-align via inline style (styleWithCSS) or the legacy align
+      // attribute; accept either. 'start' is the initial value, i.e. no explicit alignment.
+      const rawAlign = el.style.textAlign || el.getAttribute('align') || ''
+      const nextAlign = rawAlign && rawAlign !== 'start' ? rawAlign : align
       if (tag === 'BR') {
-        fonts.push(font)
+        // An explicit <br> is always a line break, even consecutive ones.
+        fonts.push(font); aligns.push(align); lastWasBreak = true
+      } else if (tag === 'DIV' || tag === 'P') {
+        emitBreak(font, align)          // block boundary before the block's content
+        for (const child of Array.from(el.childNodes)) walk(child, nextFont, nextAlign)
+        emitBreak(nextFont, nextAlign)  // block boundary after it
       } else {
-        // Mirror innerText: block elements emit a leading newline when not first
-        if ((tag === 'DIV' || tag === 'P') && fonts.length > 0) fonts.push(nextFont)
-        for (const child of Array.from(el.childNodes)) walk(child, nextFont)
+        for (const child of Array.from(el.childNodes)) walk(child, nextFont, nextAlign)
       }
     }
   }
-  for (const child of Array.from(textExtractor.childNodes)) walk(child, '')
+  for (const child of Array.from(textExtractor.childNodes)) walk(child, '', '')
 
-  // Pad/trim to match innerText length in case of complex HTML edge cases
-  while (fonts.length < text.length) fonts.push('')
-  return { text, styles: fonts.slice(0, text.length) }
+  // A trailing block break maps past the end of innerText; pad/trim to match its length.
+  while (fonts.length < text.length) { fonts.push(''); aligns.push('') }
+  return { text, styles: fonts.slice(0, text.length), aligns: aligns.slice(0, text.length) }
 }
 
 export function escapeHtml(s: string): string {
@@ -118,9 +138,9 @@ function openSpanFor(entry: CharEntry, pasteColor: string): string {
   return `<span style="${fontStyle}">`
 }
 
-// pasteColor lets callers (the PDF export) substitute a darker, print-readable yellow
-// while live replay uses the default light yellow.
-export function renderHistory(history: CharEntry[], pasteColor: string = SCREEN_PASTE_COLOR): string {
+// Renders a run of chars as one continuous inline stream: '\n' → <br>, with color/font
+// spans opened and closed by styleKey. This is the whole document when nothing is aligned.
+function renderInlineStream(history: CharEntry[], pasteColor: string): string {
   let html = ''
   let openKey = ''
 
@@ -135,6 +155,50 @@ export function renderHistory(history: CharEntry[], pasteColor: string = SCREEN_
   }
 
   if (openKey) html += '</span>'
+  return html
+}
+
+// pasteColor lets callers (the PDF export) substitute a darker, print-readable yellow
+// while live replay uses the default light yellow.
+export function renderHistory(history: CharEntry[], pasteColor: string = SCREEN_PASTE_COLOR): string {
+  // Fast path: no alignment anywhere → the original flat inline rendering, unchanged.
+  if (!history.some((e) => e.textAlign)) {
+    return renderInlineStream(history, pasteColor)
+  }
+
+  // Alignment-aware path. text-align only takes effect on a block element, so split the
+  // history into lines (at '\n') and wrap each aligned line in a <div> carrying its
+  // text-align. A line's alignment comes from its content; the block <div> supplies its
+  // own line break, so the terminating '\n' is absorbed rather than rendered as <br>.
+  type Line = { entries: CharEntry[]; align: string; terminated: boolean }
+  const lines: Line[] = []
+  let cur: CharEntry[] = []
+  for (const e of history) {
+    if (e.char === '\n') {
+      lines.push({ entries: cur, align: cur[0]?.textAlign || e.textAlign || '', terminated: true })
+      cur = []
+    } else {
+      cur.push(e)
+    }
+  }
+  lines.push({ entries: cur, align: cur[0]?.textAlign || '', terminated: false })
+
+  let html = ''
+  for (let k = 0; k < lines.length; k++) {
+    const line = lines[k]
+    const content = renderInlineStream(line.entries, pasteColor)
+    if (line.align) {
+      html += `<div style="text-align:${line.align}">${content || '<br>'}</div>`
+    } else {
+      html += content
+      // Emit the break for this line's terminating '\n' — unless the next line is a
+      // block <div>, which already breaks the flow (avoids a doubled blank line).
+      if (line.terminated) {
+        const nextIsBlock = k + 1 < lines.length && !!lines[k + 1].align
+        if (!nextIsBlock) html += '<br>'
+      }
+    }
+  }
   return html
 }
 
@@ -288,7 +352,7 @@ export class Player {
   }
 
   private applyBaseline(html: string): void {
-    const { text, styles } = htmlToTextAndStyles(html)
+    const { text, styles, aligns } = htmlToTextAndStyles(html)
     this.pendingOverwrite = false
     this.overwriteBalance = 0
     this.pendingOverwriteMaxCount = 0
@@ -296,7 +360,8 @@ export class Player {
 
     if (this.history.length === 0) {
       this.history = Array.from(text).map((char, i) => ({
-        char, type: 'typed' as CharType, fontFamily: styles[i] || undefined,
+        char, type: 'typed' as CharType,
+        fontFamily: styles[i] || undefined, textAlign: aligns[i] || undefined,
       }))
       return
     }
@@ -305,6 +370,7 @@ export class Player {
     if (text === currentText) {
       for (let i = 0; i < this.history.length; i++) {
         this.history[i].fontFamily = styles[i] || undefined
+        this.history[i].textAlign = aligns[i] || undefined
       }
       return
     }
@@ -316,12 +382,14 @@ export class Player {
     if (deletedCount > 0) this.history.splice(prefixLen, deletedCount)
     if (addedText.length > 0) {
       const entries: CharEntry[] = Array.from(addedText).map((char, i) => ({
-        char, type: 'typed' as CharType, fontFamily: styles[prefixLen + i] || undefined,
+        char, type: 'typed' as CharType,
+        fontFamily: styles[prefixLen + i] || undefined, textAlign: aligns[prefixLen + i] || undefined,
       }))
       this.history.splice(prefixLen, 0, ...entries)
     }
     for (let i = 0; i < this.history.length; i++) {
       this.history[i].fontFamily = styles[i] || undefined
+      this.history[i].textAlign = aligns[i] || undefined
     }
   }
 
@@ -341,8 +409,8 @@ export class Player {
     this.tabSwitchCb?.(toTabId, toTabName)
   }
 
-  private applyFrame(currHtml: string): { text: string; fontsChanged: boolean } {
-    const { text: currText, styles: currStyles } = htmlToTextAndStyles(currHtml)
+  private applyFrame(currHtml: string): { text: string; stylesChanged: boolean } {
+    const { text: currText, styles: currStyles, aligns: currAligns } = htmlToTextAndStyles(currHtml)
     const { prefixLen, prevEnd, currEnd } = diffRange(this.prevActiveText, currText)
 
     const deletedCount = prevEnd - prefixLen
@@ -426,15 +494,18 @@ export class Player {
       this.history.splice(prefixLen, 0, ...entries)
     }
 
-    // Sync font-family for every char from current frame — handles style changes to existing text
-    let fontsChanged = false
+    // Sync font-family and alignment for every char from the current frame — handles
+    // style/alignment changes applied to text that already exists in the history.
+    let stylesChanged = false
     for (let i = 0; i < this.history.length; i++) {
-      const next = currStyles[i] || undefined
-      if (this.history[i].fontFamily !== next) fontsChanged = true
-      this.history[i].fontFamily = next
+      const nextFont = currStyles[i] || undefined
+      const nextAlign = currAligns[i] || undefined
+      if (this.history[i].fontFamily !== nextFont || this.history[i].textAlign !== nextAlign) stylesChanged = true
+      this.history[i].fontFamily = nextFont
+      this.history[i].textAlign = nextAlign
     }
 
-    return { text: currText, fontsChanged }
+    return { text: currText, stylesChanged }
   }
 
   private scheduleNext(): void {
@@ -456,9 +527,9 @@ export class Player {
         this.emitStats()
       } else {
         const oldText = this.prevActiveText
-        const { text: newText, fontsChanged } = this.applyFrame(this.reconstructedHtml)
+        const { text: newText, stylesChanged } = this.applyFrame(this.reconstructedHtml)
         this.prevActiveText = newText
-        if (newText !== oldText || fontsChanged) {
+        if (newText !== oldText || stylesChanged) {
           this.el.innerHTML = renderHistory(this.history)
           this.emitStats()
         }

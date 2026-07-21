@@ -26,6 +26,9 @@ const btnSkipEnd = document.getElementById('btn-skip-end') as HTMLButtonElement
 const speedBtns = document.querySelectorAll<HTMLButtonElement>('.speed-btn')
 const btnBold = document.getElementById('btn-bold') as HTMLButtonElement
 const btnItalic = document.getElementById('btn-italic') as HTMLButtonElement
+const btnAlignLeft = document.getElementById('btn-align-left') as HTMLButtonElement
+const btnAlignCenter = document.getElementById('btn-align-center') as HTMLButtonElement
+const btnAlignRight = document.getElementById('btn-align-right') as HTMLButtonElement
 const fontSizeInput = document.getElementById('font-size-input') as HTMLInputElement
 const docTabBar = document.getElementById('doc-tab-bar') as HTMLDivElement
 const btnAddTab = document.getElementById('btn-add-tab') as HTMLButtonElement
@@ -598,6 +601,20 @@ writeArea.addEventListener('keydown', (e: KeyboardEvent) => {
     return
   }
   if (!(e.metaKey || e.ctrlKey)) return
+  if (e.shiftKey) {
+    const key = e.key.toLowerCase()
+    if (key === 'l') {
+      e.preventDefault()
+      applyAlign('justifyLeft')
+    } else if (key === 'e') {
+      e.preventDefault()
+      applyAlign('justifyCenter')
+    } else if (key === 'r') {
+      e.preventDefault()
+      applyAlign('justifyRight')
+    }
+    return
+  }
   if (e.key === 'b') {
     e.preventDefault()
     document.execCommand('bold')
@@ -716,6 +733,19 @@ btnSkipEnd.addEventListener('click', () => {
 
 btnBold.addEventListener('mousedown', (e) => { e.preventDefault(); document.execCommand('bold') })
 btnItalic.addEventListener('mousedown', (e) => { e.preventDefault(); document.execCommand('italic') })
+
+// Emit alignment as an inline `text-align` style (not the legacy `align` attribute) so the
+// replay's char-history extractor reads it back consistently. styleWithCSS is scoped to the
+// alignment command and reset afterward, leaving bold/italic on their default <b>/<i> form.
+function applyAlign(cmd: 'justifyLeft' | 'justifyCenter' | 'justifyRight'): void {
+  document.execCommand('styleWithCSS', false, 'true')
+  document.execCommand(cmd)
+  document.execCommand('styleWithCSS', false, 'false')
+}
+
+btnAlignLeft.addEventListener('mousedown', (e) => { e.preventDefault(); applyAlign('justifyLeft') })
+btnAlignCenter.addEventListener('mousedown', (e) => { e.preventDefault(); applyAlign('justifyCenter') })
+btnAlignRight.addEventListener('mousedown', (e) => { e.preventDefault(); applyAlign('justifyRight') })
 
 // Keep focus (and the caret) in the write area when checking the word count.
 btnWordCount.addEventListener('mousedown', (e) => e.preventDefault())
