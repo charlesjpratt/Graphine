@@ -1,5 +1,27 @@
-import type { Frame, Recording } from './types'
+import type { Frame, Recording, EditIntent } from './types'
 import { buildDelta, titleFromText } from './frameCodec'
+
+// Normalize a native InputEvent.inputType into the coarse intent replay cares about.
+// Synthetic input events dispatched by the write controls (plain-text paste, styled-char
+// insertion) set inputType too, so this covers them as well. Unknown or ambiguous types
+// (notably historyUndo/Redo, which may add or remove text) return undefined, leaving replay
+// to fall back to its snapshot-diff heuristic for that frame.
+export function intentFromInputType(inputType: string | undefined): EditIntent | undefined {
+  if (!inputType) return undefined
+  if (inputType.startsWith('insert')) {
+    if (inputType === 'insertFromPaste' || inputType === 'insertFromPasteAsQuotation') return 'paste'
+    if (inputType === 'insertFromDrop') return 'drop'
+    if (inputType === 'insertReplacementText') return 'replace'
+    return 'type'  // insertText, insertParagraph, insertLineBreak, insertCompositionText, …
+  }
+  if (inputType.startsWith('delete')) {
+    // A cut or drag-out is a structural removal; everything else is a backspace-style edit.
+    if (inputType === 'deleteByCut' || inputType === 'deleteByDrag') return 'deleteCut'
+    return 'deleteEdit'
+  }
+  if (inputType.startsWith('format')) return 'format'
+  return undefined
+}
 
 export class Recorder {
   private el: HTMLElement
@@ -7,7 +29,7 @@ export class Recorder {
   private startTime = 0
   private lastEventTime = 0
   private lastHtml = ''
-  private handler: (() => void) | null = null
+  private handler: ((e: Event) => void) | null = null
 
   constructor(el: HTMLElement) {
     this.el = el
@@ -30,17 +52,23 @@ export class Recorder {
   }
 
   private attach(): void {
-    this.handler = () => {
+    this.handler = (e: Event) => {
       const now = Date.now()
       const html = this.el.innerHTML
       if (this.frames.length > 0 && html === this.lastHtml) {
         this.lastEventTime = now
         return
       }
-      // First frame is a self-contained keyframe; later frames are deltas.
-      const frame: Frame = this.frames.length === 0
-        ? { t: 0, v: html }
-        : { t: now - this.lastEventTime, d: buildDelta(this.lastHtml, html) }
+      // First frame is a self-contained keyframe; later frames are deltas that carry the
+      // recorded edit intent so replay classifies provenance from truth, not inference.
+      let frame: Frame
+      if (this.frames.length === 0) {
+        frame = { t: 0, v: html }
+      } else {
+        frame = { t: now - this.lastEventTime, d: buildDelta(this.lastHtml, html) }
+        const intent = intentFromInputType((e as InputEvent).inputType)
+        if (intent) frame.intent = intent
+      }
       this.frames.push(frame)
       this.lastHtml = html
       this.lastEventTime = now

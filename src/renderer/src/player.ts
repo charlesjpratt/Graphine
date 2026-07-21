@@ -1,4 +1,4 @@
-import type { Recording, PlaybackOptions } from './types'
+import type { Recording, PlaybackOptions, EditIntent } from './types'
 import { frameToHtml, diffRange } from './frameCodec'
 
 // ── Char history ──────────────────────────────────────────────────────────────
@@ -343,7 +343,7 @@ export class Player {
       if (frame.baseline) {
         this.applyBaseline(this.reconstructedHtml)
       } else {
-        this.prevActiveText = this.applyFrame(this.reconstructedHtml).text
+        this.prevActiveText = this.applyFrame(this.reconstructedHtml, frame.intent).text
         if (frame.tabSwitch) {
           this.handleTabSwitch(frame.tabSwitch.toTabId, frame.tabSwitch.toTabName)
         }
@@ -448,7 +448,7 @@ export class Player {
     this.tabSwitchCb?.(toTabId, toTabName)
   }
 
-  private applyFrame(currHtml: string): { text: string; stylesChanged: boolean } {
+  private applyFrame(currHtml: string, intent?: EditIntent): { text: string; stylesChanged: boolean } {
     const { text: currText, styles: currStyles } = htmlToTextAndStyles(currHtml)
     const { prefixLen, prevEnd, currEnd } = diffRange(this.prevActiveText, currText)
 
@@ -467,12 +467,20 @@ export class Player {
     // char-level overwrite (see BLOCK_DELETE_THRESHOLD).
     const blockScaleDelete = deletedNonNl > BLOCK_DELETE_THRESHOLD
 
-    // Pure deletion: accumulate balance and remember the max overwrite depth. But a
-    // single large deletion — or a backspace run that accumulates past the block
-    // threshold — is a block delete, not a correction: clear overwrite mode so the
-    // text typed or pasted afterwards replays plain instead of red.
+    // Recorded edit intent (when present) tells us for certain what the size heuristic can
+    // only guess: whether a small removal was a backspace correction or a structural
+    // cut/drag-out, and whether an insertion is a drag-move landing. Legacy frames carry no
+    // intent, leaving both flags false so classification stays exactly as before.
+    const structuralDelete = intent === 'deleteCut'
+    const isDropInsert = intent === 'drop'
+
+    // Pure deletion: a backspace-style correction accumulates balance and remembers the max
+    // overwrite depth so the following retype replays red. A structural removal (a cut or
+    // drag-out, known from intent) or a run past the block threshold is NOT a correction:
+    // clear overwrite mode so text typed or pasted afterwards replays plain instead of red.
     if (deletedNonNl > 0 && addedNonNl.length === 0) {
-      if (this.overwriteBalance + deletedNonNl > BLOCK_DELETE_THRESHOLD) {
+      const pastThreshold = this.overwriteBalance + deletedNonNl > BLOCK_DELETE_THRESHOLD
+      if (structuralDelete || pastThreshold) {
         this.pendingOverwrite = false
         this.overwriteBalance = 0
         this.pendingOverwriteMaxCount = 0
@@ -484,10 +492,10 @@ export class Player {
     }
 
     // select+type in one frame is always overwrite; pending balance covers backspace+type.
-    // A block-scale replacement (e.g. a drag-move landing in one frame) is excluded so
+    // A block-scale replacement, or a drag-move landing (known from intent), is excluded so
     // the relocated text isn't painted red.
-    const directOverwrite = deletedNonNl > 0 && addedNonNl.length > 0 && !blockScaleDelete
-    const pendingOverwrite = this.pendingOverwrite && deletedNonNl === 0 && addedNonNl.length > 0
+    const directOverwrite = deletedNonNl > 0 && addedNonNl.length > 0 && !blockScaleDelete && !isDropInsert
+    const pendingOverwrite = this.pendingOverwrite && deletedNonNl === 0 && addedNonNl.length > 0 && !isDropInsert
     const isOverwrite = directOverwrite || pendingOverwrite
 
     // A bulk insert (>1 non-newline char in one frame) is a paste. It stays an
@@ -567,7 +575,7 @@ export class Player {
         this.emitStats()
       } else {
         const oldText = this.prevActiveText
-        const { text: newText, stylesChanged } = this.applyFrame(this.reconstructedHtml)
+        const { text: newText, stylesChanged } = this.applyFrame(this.reconstructedHtml, frame.intent)
         this.prevActiveText = newText
         if (newText !== oldText || stylesChanged) {
           this.el.innerHTML = renderHistory(this.history)
