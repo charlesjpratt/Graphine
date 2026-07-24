@@ -111,7 +111,7 @@ export function buildExportHtml(sections: ExportSection[], meta: ExportMeta): st
   h3 { font-size: 13pt; margin: 1.2em 0 0.4em; }
   /* The color-coded section always begins on its own page. */
   .page-break { break-before: page; page-break-before: always; }
-  .doc { white-space: pre-wrap; word-wrap: break-word; }
+  .doc { white-space: pre-wrap; word-wrap: break-word; tab-size: 4; }
   .stats { margin-top: 0.8em; font-size: 10pt; }
   .stat-bar { height: 6px; border-radius: 3px; overflow: hidden; background: #f1f1ee; margin-bottom: 0.4em; }
   .stat-labels { color: #374151; }

@@ -531,6 +531,7 @@ body[data-view="replay"] #minimap-wrap {
   user-select: text;
   white-space: pre-wrap;
   word-wrap: break-word;
+  tab-size: 4;
 }
 
 /* Placeholder via CSS on empty contenteditable */
@@ -644,6 +645,7 @@ body[data-view="write"] #char-stats { display: none; }
   overflow-y: auto;
   white-space: pre-wrap;
   word-wrap: break-word;
+  tab-size: 4;
 }
 
 #player-controls {

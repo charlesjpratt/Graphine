@@ -504,6 +504,27 @@ function insertCharWithStyles(char: string, sizeRem: number | null, fontFamilyKe
   writeArea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
 }
 
+// Shift+Tab outdent: if the caret sits just after a tab character, remove that one tab.
+// execCommand('delete') keeps the change on the contentEditable undo stack and fires an
+// input event so the recorder captures it (as a backspace-style edit) like any other edit.
+function outdentAtCaret(): void {
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0) return
+  const range = sel.getRangeAt(0)
+  if (!range.collapsed) return
+  const node = range.startContainer
+  const offset = range.startOffset
+  if (node.nodeType !== Node.TEXT_NODE || offset === 0) return
+  if (node.textContent?.[offset - 1] !== '\t') return
+
+  const del = document.createRange()
+  del.setStart(node, offset - 1)
+  del.setEnd(node, offset)
+  sel.removeAllRanges()
+  sel.addRange(del)
+  document.execCommand('delete')
+}
+
 // Wrap a selection range in a styled span, reselect the wrapped content, and capture
 // a frame if recording. Shared by the font-size and font-family controls.
 function wrapRangeWithStyle(range: Range, prop: 'fontSize' | 'fontFamily', value: string): void {
@@ -598,6 +619,22 @@ writeArea.addEventListener('keydown', (e: KeyboardEvent) => {
     insertCharWithStyles(e.key, pendingFontSize, pendingFontFamily)
     pendingFontSize = null
     pendingFontFamily = null
+    return
+  }
+  // Tab inserts a literal tab for indentation (default would move focus out of the
+  // editable area); Shift+Tab removes one preceding tab. white-space: pre-wrap renders
+  // the tab in the write, replay, and PDF views alike.
+  if (e.key === 'Tab' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    e.preventDefault()
+    if (e.shiftKey) {
+      outdentAtCaret()
+    } else if (pendingFontSize !== null || pendingFontFamily !== null) {
+      insertCharWithStyles('\t', pendingFontSize, pendingFontFamily)
+      pendingFontSize = null
+      pendingFontFamily = null
+    } else {
+      document.execCommand('insertText', false, '\t')
+    }
     return
   }
   if (!(e.metaKey || e.ctrlKey)) return
