@@ -266,6 +266,9 @@ export class Player {
   private overwriteBalance = 0
   private pendingOverwriteMaxCount = 0
   private pasteGroupCounter = 0
+  // Provenance of the most recent structural removal (cut / drag-out), so a later internal
+  // paste or drop landing can restore the moved text's original color instead of minting it.
+  private pendingRemovedRun: { text: string; entries: CharEntry[] } | null = null
   private tabHistories = new Map<string, { history: CharEntry[]; prevText: string }>()
   private currentTabId: string | null = null
   private reconstructedHtml = ''
@@ -302,6 +305,7 @@ export class Player {
     this.overwriteBalance = 0
     this.pendingOverwriteMaxCount = 0
     this.pasteGroupCounter = 0
+    this.pendingRemovedRun = null
     this.tabHistories = new Map()
     this.currentTabId = null
     this.reconstructedHtml = ''
@@ -463,6 +467,41 @@ export class Player {
       deletedMaxCount = Math.max(deletedMaxCount, this.history[i].overwriteCount ?? 0)
     }
 
+    // Remember a structural removal (cut / drag-out) with its provenance, so if the same text
+    // is pasted or dropped back into the doc as an internal move it keeps its original color.
+    if (intent === 'deleteCut' && deletedCount > 0 && addedText.length === 0) {
+      const removed = this.history.slice(prefixLen, prefixLen + deletedCount)
+      this.pendingRemovedRun = { text: removed.map((e) => e.char).join(''), entries: removed.map((e) => ({ ...e })) }
+    }
+
+    // Internal copy/paste or drag-move: the inserted text is a duplicate or relocation of
+    // content already in this doc, so it inherits that source's provenance — plain if the
+    // source was typed, yellow if the source was itself pasted from outside — rather than
+    // being classified anew. Tagged 'internal' at capture time (main.ts / recorder.ts).
+    if (intent === 'internal' && addedText.length > 0) {
+      // Relocated/duplicated content is never a correction: end any overwrite context.
+      this.pendingOverwrite = false
+      this.overwriteBalance = 0
+      this.pendingOverwriteMaxCount = 0
+
+      const source = this.findInternalSource(addedText)
+      const newPasteGroup = ++this.pasteGroupCounter
+      const entries: CharEntry[] = Array.from(addedText).map((char, i) => {
+        const s = source?.[i]
+        // Treat pasted source chars — and pasted-overwrite chars (yellow-boxed) — as pasted.
+        const inheritPasted = !!s && (s.type === 'pasted' || (s.type === 'overwrite' && s.pasteGroup != null))
+        return inheritPasted
+          ? { char, type: 'pasted' as CharType, pasteGroup: newPasteGroup }
+          : { char, type: 'typed' as CharType }
+      })
+
+      if (deletedCount > 0) this.history.splice(prefixLen, deletedCount)
+      this.history.splice(prefixLen, 0, ...entries)
+      if (this.pendingRemovedRun?.text === addedText) this.pendingRemovedRun = null
+
+      return { text: currText, stylesChanged: this.syncStyles(currStyles) }
+    }
+
     // A block-scale deletion in this single frame is a structural edit, not a
     // char-level overwrite (see BLOCK_DELETE_THRESHOLD).
     const blockScaleDelete = deletedNonNl > BLOCK_DELETE_THRESHOLD
@@ -501,7 +540,15 @@ export class Player {
     // A bulk insert (>1 non-newline char in one frame) is a paste. It stays an
     // 'overwrite' when it also deleted text — but we still tag the paste so it gets the
     // yellow box, signalling "an overwrite that was pasted".
-    const wasPasted = addedNonNl.length > 1
+    //
+    // Provenance comes from recorded intent when present: an external paste is 'paste' (yellow);
+    // ordinary typing is 'type' (plain, even when a keystroke batches >1 char). Internal
+    // copy/paste and drag-moves ('internal') are handled above. Legacy frames and other intents
+    // (drop-from-outside, replace) fall back to the size heuristic, unchanged.
+    const wasPasted =
+      intent === 'paste' ? true
+      : intent === 'type' ? false
+      : addedNonNl.length > 1
     const addType: CharType = isOverwrite ? 'overwrite' : wasPasted ? 'pasted' : 'typed'
 
     // Capture base count before spend-down can reset pendingOverwriteMaxCount
@@ -541,8 +588,24 @@ export class Player {
       this.history.splice(prefixLen, 0, ...entries)
     }
 
-    // Sync font-family, alignment, and bold/italic for every char from the current frame —
-    // handles styling toggled on text that already exists in the history.
+    return { text: currText, stylesChanged: this.syncStyles(currStyles) }
+  }
+
+  // Locate the provenance source for an internal insertion: an identical run still present in
+  // the doc (a copy/paste), or the run just removed by a cut/drag-out (a move). Returns the
+  // source char entries aligned to addedText, or null when no match is found (treat as typed).
+  private findInternalSource(addedText: string): CharEntry[] | null {
+    const histText = this.history.map((e) => e.char).join('')
+    const idx = histText.indexOf(addedText)
+    if (idx >= 0) return this.history.slice(idx, idx + addedText.length)
+    if (this.pendingRemovedRun?.text === addedText) return this.pendingRemovedRun.entries
+    return null
+  }
+
+  // Sync font-family, alignment, and bold/italic for every char from the current frame —
+  // handles styling toggled on text that already exists in the history. Returns whether any
+  // char's style changed.
+  private syncStyles(currStyles: CharStyle[]): boolean {
     let stylesChanged = false
     for (let i = 0; i < this.history.length; i++) {
       const e = this.history[i]
@@ -552,8 +615,7 @@ export class Player {
       }
       Object.assign(e, s)
     }
-
-    return { text: currText, stylesChanged }
+    return stylesChanged
   }
 
   private scheduleNext(): void {

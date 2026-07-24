@@ -10,8 +10,12 @@ export interface FrameDelta {
 // before intent existed (and structural keyframes) carry none, and replay falls back to the
 // size-based heuristic for those.
 //   type       — insertText / paragraph / line break: ordinary typing
-//   paste      — insertFromPaste: bulk insert from the clipboard
-//   drop       — insertFromDrop: text relocated by a drag-move (never an overwrite)
+//   paste      — insertFromPaste: bulk insert of content from OUTSIDE the doc (yellow)
+//   internal   — copy/paste or drag-move of content that already lives in this doc; replay
+//                inherits the copied source's provenance (plain if it was typed, yellow if it
+//                was itself an external paste) instead of classifying it anew. Set by the app,
+//                not by any native inputType — see main.ts / recorder.markInternalInsert.
+//   drop       — insertFromDrop from OUTSIDE the doc: incoming content, never an overwrite
 //   replace    — insertReplacementText: e.g. autocorrect swapping a word in place
 //   deleteEdit — deleteContentBackward/Forward, deleteWord*: a backspace-style correction
 //   deleteCut  — deleteByCut / deleteByDrag: a structural removal, not a correction
@@ -19,6 +23,7 @@ export interface FrameDelta {
 export type EditIntent =
   | 'type'
   | 'paste'
+  | 'internal'
   | 'drop'
   | 'replace'
   | 'deleteEdit'

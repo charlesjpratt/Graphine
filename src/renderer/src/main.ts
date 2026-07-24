@@ -661,6 +661,30 @@ writeArea.addEventListener('keydown', (e: KeyboardEvent) => {
   }
 })
 
+// Text copied or cut from within the editor, so a later paste of the same content can be
+// recognized as internal (authored here) rather than incoming — see the paste handler.
+let lastInternalClipboardText = ''
+const normalizeBreaks = (s: string): string => s.replace(/\r\n?/g, '\n')
+
+const captureInternalCopy = (): void => {
+  lastInternalClipboardText = normalizeBreaks(window.getSelection()?.toString() ?? '')
+}
+writeArea.addEventListener('copy', captureInternalCopy)
+writeArea.addEventListener('cut', captureInternalCopy)
+
+// True while a drag that started inside the editor is in flight, so a drop landing back in
+// the editor is treated as an internal move rather than incoming content.
+let internalDragActive = false
+writeArea.addEventListener('dragstart', () => { internalDragActive = true })
+writeArea.addEventListener('dragend', () => { internalDragActive = false })
+// Native drop insertion is left as-is; we only tag its provenance. A drop whose drag
+// originated inside the editor is an internal move → the recorder tags the resulting
+// insertFromDrop frame 'internal', and replay inherits the moved text's original provenance.
+// External drag-ins never set the flag → they stay yellow via the size heuristic.
+writeArea.addEventListener('drop', () => {
+  if (internalDragActive) recorder.markInternalInsert()
+})
+
 // Paste as plain text so line breaks become literal '\n' text nodes (matching
 // typed Enter under white-space: pre-wrap) instead of Chromium's default <br>/div
 // HTML — which double-counts breaks on replay (innerText sees both \n and <br>).
@@ -668,7 +692,7 @@ writeArea.addEventListener('paste', (e: ClipboardEvent) => {
   e.preventDefault()
   const text = e.clipboardData?.getData('text/plain') ?? ''
   if (!text) return
-  const normalized = text.replace(/\r\n?/g, '\n')
+  const normalized = normalizeBreaks(text)
 
   // Establish the baseline from the pre-paste content first, so the paste below records
   // as its own delta frame and replays as 'pasted' (yellow). Without this, the generic
@@ -689,6 +713,12 @@ writeArea.addEventListener('paste', (e: ClipboardEvent) => {
   sel.removeAllRanges()
   sel.addRange(newRange)
 
+  // Clipboard content that exactly matches what was last copied/cut from this doc is an
+  // internal copy: flag it so replay inherits the copied source's provenance — plain if the
+  // source was typed, still yellow if the source was itself pasted from outside. Anything else
+  // is an external paste (stays yellow). Exact-match is conservative: a miss keeps the yellow
+  // behavior. Both cases dispatch insertFromPaste; the flag is what distinguishes them.
+  if (normalized === lastInternalClipboardText) recorder.markInternalInsert()
   writeArea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertFromPaste' }))
 })
 

@@ -30,14 +30,25 @@ export class Recorder {
   private lastEventTime = 0
   private lastHtml = ''
   private handler: ((e: Event) => void) | null = null
+  private internalInsertPending = false
 
   constructor(el: HTMLElement) {
     this.el = el
   }
 
+  // Flag the next paste/drop frame as an internal copy/move — clipboard or drag content that
+  // already lived in this doc — so replay tags it 'internal' and inherits the copied source's
+  // provenance rather than minting a fresh paste. Set by main.ts for a paste whose text
+  // matches an in-doc copy, or a drop whose drag originated inside the editor; consumed by the
+  // input handler on the next insertFromPaste/insertFromDrop frame.
+  markInternalInsert(): void {
+    this.internalInsertPending = true
+  }
+
   start(): void {
     this.frames = []
     this.lastHtml = ''
+    this.internalInsertPending = false
     this.startTime = Date.now()
     this.lastEventTime = this.startTime
     this.attach()
@@ -66,8 +77,18 @@ export class Recorder {
         frame = { t: 0, v: html }
       } else {
         frame = { t: now - this.lastEventTime, d: buildDelta(this.lastHtml, html) }
-        const intent = intentFromInputType((e as InputEvent).inputType)
-        if (intent) frame.intent = intent
+        const inputType = (e as InputEvent).inputType
+        // A paste/drop of content that originated inside the doc is an internal copy or move,
+        // not incoming content: record it as 'internal' so replay inherits the source's
+        // provenance. Scoped to the paste/drop insert frame, leaving a paired deleteByDrag
+        // (source removal) to record as its own structural delete.
+        if (this.internalInsertPending && (inputType === 'insertFromPaste' || inputType === 'insertFromDrop')) {
+          frame.intent = 'internal'
+          this.internalInsertPending = false
+        } else {
+          const intent = intentFromInputType(inputType)
+          if (intent) frame.intent = intent
+        }
       }
       this.frames.push(frame)
       this.lastHtml = html
@@ -126,6 +147,7 @@ export class Recorder {
     }
     this.frames = []
     this.lastHtml = ''
+    this.internalInsertPending = false
   }
 
   get frameCount(): number {
