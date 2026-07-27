@@ -1,3 +1,5 @@
+import type { UndoState } from './undo';
+
 export interface FrameDelta {
   p: number;  // common-prefix length
   r: number;  // chars removed after the prefix
@@ -20,6 +22,10 @@ export interface FrameDelta {
 //   deleteEdit — deleteContentBackward/Forward, deleteWord*: a backspace-style correction
 //   deleteCut  — deleteByCut / deleteByDrag: a structural removal, not a correction
 //   format     — formatBold/Italic/etc: styling change, no text added or removed
+//   historyUndo/historyRedo — an undo or redo step. Neither authors nor discards text: it
+//                restores an earlier state, so replay gives the re-inserted characters back
+//                their original provenance instead of classifying them anew (which would
+//                paint an undone deletion yellow, as though it had been pasted in).
 export type EditIntent =
   | 'type'
   | 'paste'
@@ -28,7 +34,9 @@ export type EditIntent =
   | 'replace'
   | 'deleteEdit'
   | 'deleteCut'
-  | 'format';
+  | 'format'
+  | 'historyUndo'
+  | 'historyRedo';
 
 export interface Frame {
   t: number;
@@ -91,4 +99,7 @@ export interface TabRuntime {
   pendingFontSize: number | null
   pendingFontFamily: string | null
   fontFamily: string
+  // Undo/redo history for this tab. Parked here while another tab is active so a Ctrl+Z
+  // can never reach across into the wrong document; never written to the .grph file.
+  undo: UndoState
 }

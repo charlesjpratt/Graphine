@@ -1,5 +1,6 @@
 import { AppState } from './types'
 import type { TabRuntime } from './types'
+import { emptyUndoState } from './undo'
 
 export function createTab(name?: string): TabRuntime {
   return {
@@ -12,6 +13,7 @@ export function createTab(name?: string): TabRuntime {
     pendingFontSize: null,
     pendingFontFamily: null,
     fontFamily: 'serif',
+    undo: emptyUndoState(),
   }
 }
 

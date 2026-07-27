@@ -27,6 +27,10 @@ export const OVERWRITE_COLORS = ['#fda4af', '#fb7185', '#f87171', '#ef4444']
 // mis-coloured red. Sized to still cover deleting a few words.
 const BLOCK_DELETE_THRESHOLD = 24
 
+// How many recent removals to keep provenance for, so an undo can hand it back. Deep enough
+// to cover a long backspace run (one entry per char) plus the block deletes around it.
+const MAX_REMOVALS = 64
+
 function overwriteColor(count: number): string {
   return OVERWRITE_COLORS[Math.min(count, OVERWRITE_COLORS.length) - 1]
 }
@@ -269,6 +273,10 @@ export class Player {
   // Provenance of the most recent structural removal (cut / drag-out), so a later internal
   // paste or drop landing can restore the moved text's original color instead of minting it.
   private pendingRemovedRun: { text: string; entries: CharEntry[] } | null = null
+  // Every recent removal, newest first, with the provenance it carried. An undo that puts
+  // characters back looks up its own removal here so the restored text keeps the colour it
+  // had — without this a >1-char re-insertion reads as a paste and replays yellow.
+  private removals: { text: string; entries: CharEntry[] }[] = []
   private tabHistories = new Map<string, { history: CharEntry[]; prevText: string }>()
   private currentTabId: string | null = null
   private reconstructedHtml = ''
@@ -306,6 +314,7 @@ export class Player {
     this.pendingOverwriteMaxCount = 0
     this.pasteGroupCounter = 0
     this.pendingRemovedRun = null
+    this.removals = []
     this.tabHistories = new Map()
     this.currentTabId = null
     this.reconstructedHtml = ''
@@ -495,9 +504,32 @@ export class Player {
           : { char, type: 'typed' as CharType }
       })
 
-      if (deletedCount > 0) this.history.splice(prefixLen, deletedCount)
+      if (deletedCount > 0) this.removeFromHistory(prefixLen, deletedCount)
       this.history.splice(prefixLen, 0, ...entries)
       if (this.pendingRemovedRun?.text === addedText) this.pendingRemovedRun = null
+
+      return { text: currText, stylesChanged: this.syncStyles(currStyles) }
+    }
+
+    // Undo/redo restores an earlier state rather than authoring or discarding content.
+    // Characters coming back get the exact provenance they carried when they left; the
+    // characters an undo removes are a structural removal, never a typo correction, so
+    // overwrite mode is cleared instead of armed for whatever is typed next.
+    if (intent === 'historyUndo' || intent === 'historyRedo') {
+      this.pendingOverwrite = false
+      this.overwriteBalance = 0
+      this.pendingOverwriteMaxCount = 0
+
+      if (deletedCount > 0) this.removeFromHistory(prefixLen, deletedCount)
+      if (addedText.length > 0) {
+        const restored = this.takeRemoval(addedText)
+        // No matching removal (it aged out of the ring, or the recording starts mid-history):
+        // fall back to plain typed rather than letting the size heuristic call it a paste.
+        const entries: CharEntry[] = restored
+          ? restored.map((e) => ({ ...e }))
+          : Array.from(addedText).map((char) => ({ char, type: 'typed' as CharType }))
+        this.history.splice(prefixLen, 0, ...entries)
+      }
 
       return { text: currText, stylesChanged: this.syncStyles(currStyles) }
     }
@@ -577,7 +609,7 @@ export class Player {
       this.pendingOverwriteMaxCount = 0
     }
 
-    if (deletedCount > 0) this.history.splice(prefixLen, deletedCount)
+    if (deletedCount > 0) this.removeFromHistory(prefixLen, deletedCount)
 
     if (addedText.length > 0) {
       const overwriteCount = isOverwrite ? baseCount + 1 : undefined
@@ -589,6 +621,39 @@ export class Player {
     }
 
     return { text: currText, stylesChanged: this.syncStyles(currStyles) }
+  }
+
+  // Splice characters out of the replayed history, remembering them and their provenance so a
+  // later undo can hand exactly those characters back. Every removal passes through here.
+  private removeFromHistory(at: number, count: number): void {
+    const removed = this.history.splice(at, count)
+    if (removed.length === 0) return
+    this.removals.unshift({
+      text: removed.map((e) => e.char).join(''),
+      entries: removed.map((e) => ({ ...e })),
+    })
+    if (this.removals.length > MAX_REMOVALS) this.removals.length = MAX_REMOVALS
+  }
+
+  // Find and consume the removal that produced `text`. Either one recorded removal (a block
+  // delete, or a previous undo step), or a run of consecutive single-char removals: backspace
+  // deletes right-to-left, so walking the ring newest-first reassembles the original order.
+  private takeRemoval(text: string): CharEntry[] | null {
+    for (let i = 0; i < this.removals.length; i++) {
+      if (this.removals[i].text === text) return this.removals.splice(i, 1)[0].entries
+    }
+    let assembled = ''
+    const parts: CharEntry[][] = []
+    for (let i = 0; i < this.removals.length; i++) {
+      assembled += this.removals[i].text
+      parts.push(this.removals[i].entries)
+      if (assembled === text) {
+        this.removals.splice(0, i + 1)
+        return parts.reduce<CharEntry[]>((all, p) => all.concat(p), [])
+      }
+      if (assembled.length >= text.length) break
+    }
+    return null
   }
 
   // Locate the provenance source for an internal insertion: an identical run still present in

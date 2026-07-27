@@ -162,8 +162,29 @@ function buildMenu(): void {
     {
       label: 'Edit',
       submenu: [
-        { role: 'undo' },
-        { role: 'redo' },
+        // Undo/redo belong to the renderer (src/renderer/src/undo.ts), not to the
+        // contenteditable's own stack — that one lives on the frame rather than the element,
+        // so it leaks across tab switches, and it silently misses edits made through Range
+        // APIs.
+        //
+        // registerAccelerator: false is load-bearing. Key events reach the renderer before
+        // the browser process, and a menu accelerator only fires for keys the page did NOT
+        // handle — but a focused contenteditable always handles Ctrl+Z itself, as an editing
+        // command. So a registered accelerator here would never fire and Chromium's own undo
+        // would run instead. The shortcut is still displayed; the renderer's keydown handler
+        // is what actually binds it, and unregistering here means the two can't double-fire.
+        {
+          label: 'Undo',
+          accelerator: 'CmdOrCtrl+Z',
+          registerAccelerator: false,
+          click: () => mainWindow?.webContents.send('menu:action', 'undo'),
+        },
+        {
+          label: 'Redo',
+          accelerator: 'CmdOrCtrl+Shift+Z',
+          registerAccelerator: false,
+          click: () => mainWindow?.webContents.send('menu:action', 'redo'),
+        },
         { type: 'separator' },
         { role: 'cut' },
         { role: 'copy' },

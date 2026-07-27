@@ -3,11 +3,14 @@ import { buildDelta, titleFromText } from './frameCodec'
 
 // Normalize a native InputEvent.inputType into the coarse intent replay cares about.
 // Synthetic input events dispatched by the write controls (plain-text paste, styled-char
-// insertion) set inputType too, so this covers them as well. Unknown or ambiguous types
-// (notably historyUndo/Redo, which may add or remove text) return undefined, leaving replay
-// to fall back to its snapshot-diff heuristic for that frame.
+// insertion, undo/redo) set inputType too, so this covers them as well. Unknown types return
+// undefined, leaving replay to fall back to its snapshot-diff heuristic for that frame.
 export function intentFromInputType(inputType: string | undefined): EditIntent | undefined {
   if (!inputType) return undefined
+  // Undo/redo may add or remove text, so the heuristic can't read them: an undone deletion
+  // looks exactly like a paste. They are recorded as themselves and resolved by replay.
+  if (inputType === 'historyUndo') return 'historyUndo'
+  if (inputType === 'historyRedo') return 'historyRedo'
   if (inputType.startsWith('insert')) {
     if (inputType === 'insertFromPaste' || inputType === 'insertFromPasteAsQuotation') return 'paste'
     if (inputType === 'insertFromDrop') return 'drop'

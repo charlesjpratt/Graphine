@@ -6,6 +6,7 @@ import { AppState } from './types'
 import type { Recording, Tab, TabRuntime, GraphineDocument } from './types'
 import { createTab, renderTabBar, startRename } from './tabs'
 import { setupMinimap } from './minimap'
+import { UndoManager, emptyUndoState } from './undo'
 import { basename, buildDefaultName, mergeRecording, wrapV1AsDocument } from './document'
 import { titleFromText } from './frameCodec'
 
@@ -51,6 +52,7 @@ function syncFontSelect(key: string): void {
 
 const recorder = new Recorder(writeArea)
 const player = new Player(replayArea, { speedMultiplier: 1, maxGapMs: 3000 })
+const undoManager = new UndoManager(writeArea)
 
 let tabs: TabRuntime[] = [createTab('Tab 1')]
 let activeTabIndex = 0
@@ -118,14 +120,17 @@ function saveActiveTabRuntime(): void {
   tab.pendingFontSize = pendingFontSize
   tab.pendingFontFamily = pendingFontFamily
   tab.fontFamily = fontFamilySelect.value
+  tab.undo = undoManager.getState()
 }
 
 // Load the active tab's editor content and toolbar state into the DOM and globals.
 // Any saved selection Range points into DOM the innerHTML swap just detached, so
-// it is always dropped rather than carried across tabs.
+// it is always dropped rather than carried across tabs. The undo history travels with
+// the tab for the same reason: its deltas only describe this tab's content.
 function restoreActiveTabRuntime(): void {
   const tab = activeTab()
   writeArea.innerHTML = tab.editorHtml
+  undoManager.setState(tab.undo)
   currentFontSizeRem = tab.fontSizeRem
   pendingFontSize = tab.pendingFontSize
   pendingFontFamily = tab.pendingFontFamily
@@ -293,6 +298,7 @@ async function doOpen(): Promise<void> {
       pendingFontSize: null,
       pendingFontFamily: null,
       fontFamily: t.fontFamily ?? 'serif',
+      undo: emptyUndoState(),
     }))
 
     tabSeq = Math.max(tabSeq, tabs.length)
@@ -302,6 +308,8 @@ async function doOpen(): Promise<void> {
 
     const tab = activeTab()
     writeArea.innerHTML = tab.editorHtml
+    // Nothing in the freshly loaded document can be undone back past its own opening state.
+    undoManager.setState(tab.undo)
     replayArea.innerHTML = ''
 
     const toLoad = sessionRecording ?? tab.loadedRecording
@@ -501,7 +509,9 @@ function insertCharWithStyles(char: string, sizeRem: number | null, fontFamilyKe
   sel.removeAllRanges()
   sel.addRange(newRange)
 
-  writeArea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+  // `data` carries the character so the undo stack can coalesce this into the surrounding
+  // typing run, exactly as it would for a native keystroke.
+  writeArea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: char }))
 }
 
 // Shift+Tab outdent: if the caret sits just after a tab character, remove that one tab.
@@ -525,8 +535,8 @@ function outdentAtCaret(): void {
   document.execCommand('delete')
 }
 
-// Wrap a selection range in a styled span, reselect the wrapped content, and capture
-// a frame if recording. Shared by the font-size and font-family controls.
+// Wrap a selection range in a styled span and reselect the wrapped content. Shared by the
+// font-size and font-family controls.
 function wrapRangeWithStyle(range: Range, prop: 'fontSize' | 'fontFamily', value: string): void {
   const fragment = range.extractContents()
   const span = document.createElement('span')
@@ -540,7 +550,11 @@ function wrapRangeWithStyle(range: Range, prop: 'fontSize' | 'fontFamily', value
     sel.removeAllRanges()
     sel.addRange(newRange)
   }
-  if (activeTab().state === AppState.Recording) recorder.captureNow()
+  // Announce the change as input rather than calling recorder.captureNow(): that puts it on
+  // the undo stack (this path mutates the DOM directly, so nothing else would), and lets the
+  // recorder time the frame like any other edit instead of stamping it t:0.
+  const inputType = prop === 'fontSize' ? 'formatFontSize' : 'formatFontName'
+  writeArea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType }))
 }
 
 function applyFontSize(targetRem: number): void {
@@ -593,6 +607,8 @@ window.electronAPI.onMenuAction((action) => {
     case 'view:replay': switchView('replay'); break
     case 'font:increase': applyFontSizeChange(FONT_STEP); break
     case 'font:decrease': applyFontSizeChange(-FONT_STEP); break
+    case 'undo': applyHistoryStep('undo'); break
+    case 'redo': applyHistoryStep('redo'); break
   }
 })
 
@@ -612,6 +628,37 @@ function ensureRecordingStarted(): void {
 }
 
 writeArea.addEventListener('input', ensureRecordingStarted)
+
+// ── Undo / redo ───────────────────────────────────────────────────────────────
+
+// Both steps mutate the write area directly, so — exactly like the paste handler — the
+// recording segment has to be opened BEFORE the mutation, or the restored state would be
+// swallowed into a fresh baseline keyframe and the step would never appear in the replay.
+// The synthetic input event that follows is what carries the intent to the recorder, and
+// that intent is what lets replay give restored characters back their original provenance.
+function applyHistoryStep(step: 'undo' | 'redo'): void {
+  if (document.body.dataset.view !== 'write') return
+  const st = activeTab().state
+  if (st === AppState.Playing || st === AppState.Paused) return
+
+  // A focused text field (the font-size box, a tab-rename input) keeps its own native undo;
+  // leave that to the browser rather than rewriting the document behind the user's back.
+  const focused = document.activeElement
+  if (focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement) {
+    document.execCommand(step)
+    return
+  }
+
+  // Checked before ensureRecordingStarted so a no-op Ctrl+Z can't open an empty segment.
+  if (step === 'undo' ? !undoManager.canUndo : !undoManager.canRedo) return
+  ensureRecordingStarted()
+  if (!(step === 'undo' ? undoManager.undo() : undoManager.redo())) return
+
+  writeArea.dispatchEvent(new InputEvent('input', {
+    bubbles: true,
+    inputType: step === 'undo' ? 'historyUndo' : 'historyRedo',
+  }))
+}
 
 writeArea.addEventListener('keydown', (e: KeyboardEvent) => {
   if ((pendingFontSize !== null || pendingFontFamily !== null) && !e.metaKey && !e.ctrlKey && !e.altKey && e.key.length === 1) {
@@ -658,6 +705,24 @@ writeArea.addEventListener('keydown', (e: KeyboardEvent) => {
   } else if (e.key === 'i') {
     e.preventDefault()
     document.execCommand('italic')
+  }
+})
+
+// Undo/redo are bound here rather than by the Edit menu's accelerators. Key events reach the
+// renderer first, and a focused contenteditable handles Ctrl+Z itself as an editing command —
+// so the accelerator would never fire and Chromium's own undo stack would run instead.
+// preventDefault is what actually stops it. Bound on the document, not the write area, so the
+// shortcut still works when focus sits on a toolbar button; applyHistoryStep does the rest of
+// the guarding. The menu items carry registerAccelerator:false so they cannot double-fire.
+document.addEventListener('keydown', (e: KeyboardEvent) => {
+  if (!(e.metaKey || e.ctrlKey) || e.altKey) return
+  const key = e.key.toLowerCase()
+  if (key === 'z') {
+    e.preventDefault()
+    applyHistoryStep(e.shiftKey ? 'redo' : 'undo')
+  } else if (key === 'y' && !e.shiftKey) {
+    e.preventDefault()
+    applyHistoryStep('redo')
   }
 })
 
