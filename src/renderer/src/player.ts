@@ -19,12 +19,13 @@ export interface CharEntry {
 // pink → red over 4 steps
 export const OVERWRITE_COLORS = ['#fda4af', '#fb7185', '#f87171', '#ef4444']
 
-// Overwrite tracking exists for small backspace-and-retype corrections (delete a
-// typo, type the fix — the fix shows red). A pure deletion larger than this many
-// chars in a single frame — or an accumulated backspace run past it — is a block
-// edit (select-delete, a cut for a move, a drag-move), NOT an overwrite. Past this
-// bound we stop arming overwrite mode so the text typed/pasted afterwards is not
-// mis-coloured red. Sized to still cover deleting a few words.
+// Size fallback used ONLY on legacy frames that carry no recorded edit intent. There, a
+// deletion bigger than this many chars in a single frame — or an accumulated backspace run
+// past it — is guessed to be a block edit (a cut for a move, a drag-move) rather than a
+// backspace-and-retype correction, so overwrite mode is not armed and the following text is
+// not mis-coloured red. Sized to still cover deleting a few words. When the frame does carry
+// an intent we know which it was, and the size no longer matters: deleting a whole paragraph
+// and writing over it counts as an overwrite.
 const BLOCK_DELETE_THRESHOLD = 24
 
 // How many recent removals to keep provenance for, so an undo can hand it back. Deep enough
@@ -564,23 +565,28 @@ export class Player {
       return { text: currText, stylesChanged: this.syncStyles(currStyles) }
     }
 
-    // A block-scale deletion in this single frame is a structural edit, not a
-    // char-level overwrite (see BLOCK_DELETE_THRESHOLD).
-    const blockScaleDelete = deletedNonNl > BLOCK_DELETE_THRESHOLD
-
     // Recorded edit intent (when present) tells us for certain what the size heuristic can
-    // only guess: whether a small removal was a backspace correction or a structural
+    // only guess: whether a removal was a backspace/select-delete correction or a structural
     // cut/drag-out, and whether an insertion is a drag-move landing. Legacy frames carry no
-    // intent, leaving both flags false so classification stays exactly as before.
+    // intent, leaving these flags false so classification stays exactly as before.
     const structuralDelete = intent === 'deleteCut'
     const isDropInsert = intent === 'drop'
+    // An insert that also removed text in the same frame — select a run, then type or paste
+    // over it. Known from intent, this is a replacement at any size.
+    const replaceInsert = intent === 'type' || intent === 'paste' || intent === 'replace'
 
-    // Pure deletion: a backspace-style correction accumulates balance and remembers the max
-    // overwrite depth so the following retype replays red. A structural removal (a cut or
-    // drag-out, known from intent) or a run past the block threshold is NOT a correction:
-    // clear overwrite mode so text typed or pasted afterwards replays plain instead of red.
+    // Without an intent to go on, a block-scale deletion in this single frame is guessed to be
+    // a structural edit rather than a char-level overwrite (see BLOCK_DELETE_THRESHOLD).
+    const blockScaleDelete = deletedNonNl > BLOCK_DELETE_THRESHOLD && !replaceInsert
+
+    // Pure deletion: a backspace-style removal accumulates balance and remembers the max
+    // overwrite depth so the text that follows replays red. This covers a whole selected
+    // paragraph deleted with Backspace/Delete just as it covers a single mistyped char — both
+    // arrive as deleteEdit, and rewriting over either is overwriting. A structural removal (a
+    // cut or drag-out, known from intent) is NOT: clear overwrite mode so text typed or pasted
+    // afterwards replays plain. With no intent recorded, fall back to the size guess.
     if (deletedNonNl > 0 && addedNonNl.length === 0) {
-      const pastThreshold = this.overwriteBalance + deletedNonNl > BLOCK_DELETE_THRESHOLD
+      const pastThreshold = !intent && this.overwriteBalance + deletedNonNl > BLOCK_DELETE_THRESHOLD
       if (structuralDelete || pastThreshold) {
         this.pendingOverwrite = false
         this.overwriteBalance = 0
@@ -625,8 +631,11 @@ export class Player {
       }
     }
 
-    // Enter (newlines only) ends the overwrite context — paragraph break, not overwriting
-    if (this.pendingOverwrite && addedText.length > 0 && addedNonNl.length === 0) {
+    // Enter (newlines only, nothing removed) ends the overwrite context — a paragraph break,
+    // not overwriting. Requires a pure insertion: emptying a paragraph leaves a <br> behind, so
+    // the delete frame reads as "removed 65 chars, added a newline" — that is the deletion we
+    // just armed on, not a break.
+    if (this.pendingOverwrite && deletedNonNl === 0 && addedText.length > 0 && addedNonNl.length === 0) {
       this.pendingOverwrite = false
       this.overwriteBalance = 0
       this.pendingOverwriteMaxCount = 0
