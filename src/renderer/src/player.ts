@@ -257,8 +257,14 @@ export class Player {
   private frames: Recording['frames'] = []
   private cursor = 0
   private timeoutId: ReturnType<typeof setTimeout> | null = null
+  // Playback position is tracked in the recording's own timeline, not wall-clock: elapsedMs
+  // is the recorded time consumed before the current playing stretch began, and
+  // playbackStartTime anchors that stretch. Keeping it unscaled is what lets the speed
+  // change mid-playback — wall-clock elapsed would have to be re-read through the new
+  // multiplier, which stalls (slower) or bursts (faster) on resume.
   private playbackStartTime = 0
-  private elapsedAtPause = 0
+  private elapsedMs = 0
+  private playing = false
   private cumulativeDelays: number[] = []
   private progressCb: ((index: number, total: number) => void) | null = null
   private completeCb: (() => void) | null = null
@@ -287,7 +293,34 @@ export class Player {
   }
 
   setOptions(options: Partial<PlaybackOptions>): void {
+    const speedChanged =
+      options.speedMultiplier != null && options.speedMultiplier !== this.options.speedMultiplier
+
+    // Bank the time already played at the old rate before the new one takes effect, then
+    // re-anchor. Also re-time the frame already in flight so the change is felt immediately
+    // rather than after the pending delay.
+    if (speedChanged && this.playing) {
+      this.elapsedMs = this.recordedElapsed()
+      this.playbackStartTime = Date.now()
+    }
     this.options = { ...this.options, ...options }
+    if (speedChanged && this.playing) {
+      this.clearTimer()
+      this.scheduleNext()
+    }
+  }
+
+  // Position in the recording's timeline right now, in recorded ms.
+  private recordedElapsed(): number {
+    if (!this.playing) return this.elapsedMs
+    return this.elapsedMs + (Date.now() - this.playbackStartTime) * this.options.speedMultiplier
+  }
+
+  private clearTimer(): void {
+    if (this.timeoutId !== null) {
+      clearTimeout(this.timeoutId)
+      this.timeoutId = null
+    }
   }
 
   // Snapshot of the current end-of-replay char history. Used by the PDF export to
@@ -306,7 +339,8 @@ export class Player {
 
   private resetState(): void {
     this.cursor = 0
-    this.elapsedAtPause = 0
+    this.elapsedMs = 0
+    this.playing = false
     this.history = []
     this.prevActiveText = ''
     this.pendingOverwrite = false
@@ -333,23 +367,22 @@ export class Player {
   }
 
   play(): void {
-    this.playbackStartTime = Date.now() - this.elapsedAtPause
+    this.clearTimer()
+    this.elapsedMs = this.recordedElapsed()
+    this.playing = true
+    this.playbackStartTime = Date.now()
     this.scheduleNext()
   }
 
   pause(): void {
-    if (this.timeoutId !== null) {
-      clearTimeout(this.timeoutId)
-      this.timeoutId = null
-    }
-    this.elapsedAtPause = Date.now() - this.playbackStartTime
+    this.clearTimer()
+    this.elapsedMs = this.recordedElapsed()
+    this.playing = false
   }
 
   skipToEnd(): void {
-    if (this.timeoutId !== null) {
-      clearTimeout(this.timeoutId)
-      this.timeoutId = null
-    }
+    this.clearTimer()
+    this.playing = false
     while (this.cursor < this.frames.length) {
       const frame = this.frames[this.cursor]
       this.reconstructedHtml = frameToHtml(frame, this.reconstructedHtml)
@@ -370,10 +403,7 @@ export class Player {
   }
 
   stop(): void {
-    if (this.timeoutId !== null) {
-      clearTimeout(this.timeoutId)
-      this.timeoutId = null
-    }
+    this.clearTimer()
     this.resetState()
     this.el.innerHTML = ''
     this.statsCb?.(0, 0, 0)
@@ -685,13 +715,14 @@ export class Player {
 
   private scheduleNext(): void {
     if (this.cursor >= this.frames.length) {
+      this.playing = false
       this.completeCb?.()
       return
     }
 
-    const expectedElapsed = this.cumulativeDelays[this.cursor] / this.options.speedMultiplier
-    const actualElapsed = Date.now() - this.playbackStartTime
-    const delay = Math.max(0, expectedElapsed - actualElapsed)
+    // Remaining recorded time until this frame is due, converted to wall-clock by the speed.
+    const remaining = this.cumulativeDelays[this.cursor] - this.recordedElapsed()
+    const delay = Math.max(0, remaining / this.options.speedMultiplier)
 
     this.timeoutId = setTimeout(() => {
       const frame = this.frames[this.cursor]
