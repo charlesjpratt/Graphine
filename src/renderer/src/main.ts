@@ -1,7 +1,7 @@
 import { Recorder } from './recorder'
 import { Player } from './player'
 import { buildExportHtml } from './pdfExport'
-import { switchView, applyState, updateProgress, showToast, setupInactivityHiding, updateStats } from './ui'
+import { switchView, applyState, updateProgress, showToast, setupInactivityHiding, updateStats, setDocTitle } from './ui'
 import { AppState } from './types'
 import type { Recording, Tab, TabRuntime, GraphineDocument } from './types'
 import { createTab, renderTabBar, startRename } from './tabs'
@@ -25,6 +25,7 @@ const btnPlayPause = document.getElementById('btn-play-pause') as HTMLButtonElem
 const btnStopPlayback = document.getElementById('btn-stop-playback') as HTMLButtonElement
 const btnSkipEnd = document.getElementById('btn-skip-end') as HTMLButtonElement
 const speedBtns = document.querySelectorAll<HTMLButtonElement>('.speed-btn')
+const gapBtns = document.querySelectorAll<HTMLButtonElement>('.gap-btn')
 const btnBold = document.getElementById('btn-bold') as HTMLButtonElement
 const btnItalic = document.getElementById('btn-italic') as HTMLButtonElement
 const btnAlignLeft = document.getElementById('btn-align-left') as HTMLButtonElement
@@ -54,7 +55,15 @@ function syncFontSelect(key: string): void {
 }
 
 const recorder = new Recorder(writeArea)
-const player = new Player(replayArea, { speedMultiplier: 1, maxGapMs: 3000 })
+
+// Longest pause replayed at its recorded length; anything longer collapses to this. Keeps a
+// session full of thinking time watchable by default. Changed at runtime from the replay
+// controls, so read maxGapMs off the player rather than this constant after startup — it is
+// only the initial value, and must match the button marked active in index.html.
+const DEFAULT_MAX_GAP_MS = 3000
+
+const player = new Player(replayArea, { speedMultiplier: 1, maxGapMs: DEFAULT_MAX_GAP_MS })
+let maxGapMs = DEFAULT_MAX_GAP_MS
 const undoManager = new UndoManager(writeArea)
 
 let tabs: TabRuntime[] = [createTab('Tab 1')]
@@ -197,13 +206,17 @@ function markDirty(): void {
   dirtySinceSave = true
   if (autosaveTimer) clearTimeout(autosaveTimer)
   autosaveTimer = setTimeout(runAutosave, AUTOSAVE_IDLE_MS)
+  setDocTitle(currentFilePath, true)
 }
 
-// Called on every successful write, manual or automatic.
+// Called on every successful write, manual or automatic. Every assignment to
+// currentFilePath is paired with one of these two, so the header title only
+// needs refreshing here.
 function markSaved(): void {
   dirtySinceSave = false
   if (autosaveTimer) clearTimeout(autosaveTimer)
   autosaveTimer = null
+  setDocTitle(currentFilePath, false)
 }
 
 function runAutosave(): void {
@@ -412,7 +425,9 @@ async function doExportPdf(): Promise<void> {
   // detached element, so the PDF matches what the replay shows. Legacy documents
   // may lack sessionStartTabId; attribute the session start to the active tab then.
   const scratch = document.createElement('div')
-  const exporter = new Player(scratch, { speedMultiplier: 1, maxGapMs: 3000 })
+  // Timing is irrelevant here — skipToEnd() applies every frame at once — but the export
+  // should track the live player's settings rather than pin its own copy of the default.
+  const exporter = new Player(scratch, { speedMultiplier: 1, maxGapMs })
   exporter.load(rec, tabRec ? undefined : (sessionStartTabId ?? tab.id))
   exporter.skipToEnd()
   const history = tabRec ? exporter.getHistory() : exporter.getHistoryForTab(tab.id)
@@ -653,6 +668,7 @@ applyState(AppState.Idle)
 updateReplayAvailable()
 setupInactivityHiding()
 renderTabBar(tabs, activeTab().id, docTabBar, tabBarCallbacks)
+setDocTitle(currentFilePath, dirtySinceSave)
 syncFontSelect(activeTab().fontFamily)
 setupMinimap(writeScroll, writeArea, minimapCanvas)
 
@@ -1138,13 +1154,29 @@ fontSizeInput.addEventListener('blur', () => {
   else fontSizeInput.value = String(Math.round(currentFontSizeRem * 10))
 })
 
+function selectInGroup(group: NodeListOf<HTMLButtonElement>, chosen: HTMLButtonElement): void {
+  group.forEach((b) => {
+    b.classList.toggle('active', b === chosen)
+    b.setAttribute('aria-pressed', String(b === chosen))
+  })
+}
+
 speedBtns.forEach((btn) => {
   btn.addEventListener('click', () => {
     const speed = parseFloat(btn.dataset.speed ?? '1')
     player.setOptions({ speedMultiplier: speed })
-    speedBtns.forEach((b) => {
-      b.classList.toggle('active', b === btn)
-      b.setAttribute('aria-pressed', String(b === btn))
-    })
+    selectInGroup(speedBtns, btn)
+  })
+})
+
+gapBtns.forEach((btn) => {
+  btn.addEventListener('click', () => {
+    // parseFloat reads "Infinity" as Infinity — the "Full" preset, which caps nothing and
+    // replays every pause at its true recorded length.
+    const gap = parseFloat(btn.dataset.gap ?? String(DEFAULT_MAX_GAP_MS))
+    if (isNaN(gap)) return
+    maxGapMs = gap
+    player.setOptions({ maxGapMs: gap })
+    selectInGroup(gapBtns, btn)
   })
 })

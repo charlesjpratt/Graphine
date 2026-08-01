@@ -14,7 +14,9 @@
   --accent-hover: #1d4ed8;
   --border: #e0dedd;
   --rec-red: #ef4444;
-  --header-h: 48px;
+  /* 18px title line stacked on top of the 46px control row */
+  --header-h: 64px;
+  --doc-title-h: 18px;
   --max-w: 700px;
   --font-ui: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   --font-write: 'Georgia', 'Times New Roman', serif;
@@ -54,7 +56,8 @@ header {
   position: relative;
   display: flex;
   align-items: center;
-  padding: 0 1.25rem;
+  /* Top padding reserves the title line; everything else centres in what's left. */
+  padding: var(--doc-title-h) 1.25rem 0;
   border-bottom: 1px solid var(--border);
   background: var(--bg);
   transition: opacity 0.35s, padding-left 0.28s ease;
@@ -81,6 +84,54 @@ body.controls-hidden header {
 #drag-region {
   display: none;
 }
+
+/* ── Document title ── */
+/* Spans the whole header so the name centres on the window, not on whatever
+   padding the platform's window controls happen to need. */
+#doc-title {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--doc-title-h);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 0 1.25rem;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* Keep a long name clear of the macOS traffic lights on both sides so it stays centred. */
+body[data-platform="darwin"] #doc-title {
+  padding: 0 90px;
+}
+
+body[data-platform="darwin"][data-fullscreen="true"] #doc-title {
+  padding: 0 1.25rem;
+}
+
+#doc-title-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#doc-title.untitled #doc-title-name {
+  font-style: italic;
+}
+
+/* Unsaved-changes marker */
+#doc-title-dot {
+  flex: none;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+#doc-title.dirty #doc-title-dot { opacity: 1; }
 
 nav {
   display: flex;
@@ -109,6 +160,9 @@ nav {
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
+  /* Pinned below the title line rather than left to the flex static position. */
+  top: var(--doc-title-h);
+  bottom: 0;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -401,7 +455,8 @@ body[data-state="recording"] .rec-dot {
 }
 
 /* ── Buttons ── */
-button:not(.tab):not(.speed-btn):not(.doc-tab):not(#btn-add-tab):not(#btn-sidebar-toggle):not(#btn-minimap-toggle) {
+/* Default button chrome, opted out of by the controls that style themselves. */
+button:not(.tab, .speed-btn, .gap-btn, .doc-tab, #btn-add-tab, #btn-sidebar-toggle, #btn-minimap-toggle) {
   font: inherit;
   font-size: 12px;
   font-weight: 500;
@@ -415,8 +470,8 @@ button:not(.tab):not(.speed-btn):not(.doc-tab):not(#btn-add-tab):not(#btn-sideba
   white-space: nowrap;
 }
 
-button:not(.tab):not(.speed-btn):not(.doc-tab):not(#btn-add-tab):not(#btn-sidebar-toggle):not(#btn-minimap-toggle):hover:not(:disabled) { background: var(--border); }
-button:not(.tab):not(.speed-btn):not(.doc-tab):not(#btn-add-tab):not(#btn-sidebar-toggle):not(#btn-minimap-toggle):disabled { opacity: 0.35; cursor: default; }
+button:not(.tab, .speed-btn, .gap-btn, .doc-tab, #btn-add-tab, #btn-sidebar-toggle, #btn-minimap-toggle):hover:not(:disabled) { background: var(--border); }
+button:not(.tab, .speed-btn, .gap-btn, .doc-tab, #btn-add-tab, #btn-sidebar-toggle, #btn-minimap-toggle):disabled { opacity: 0.35; cursor: default; }
 
 #btn-stop-save,
 #btn-save-for-replay {
@@ -590,10 +645,13 @@ body[data-replay-available="false"][data-view="replay"] #player-controls { visib
   position: absolute;
   left: 50%;
   transform: translateX(-50%);
+  top: var(--doc-title-h);
+  bottom: 0;
   width: 200px;
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 4px;
   pointer-events: none;
   -webkit-app-region: no-drag;
@@ -667,13 +725,32 @@ body[data-view="write"] #char-stats { display: none; }
   flex-wrap: wrap;
 }
 
-/* ── Speed buttons ── */
-#speed-controls {
+/* ── Speed / max-pause buttons ── */
+#playback-options {
   display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+#speed-controls,
+#gap-controls {
+  display: flex;
+  align-items: center;
   gap: 3px;
 }
 
-.speed-btn {
+.opt-label {
+  margin-right: 4px;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.03em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.speed-btn,
+.gap-btn {
   font: inherit;
   font-size: 11px;
   font-weight: 600;
@@ -686,8 +763,11 @@ body[data-view="write"] #char-stats { display: none; }
   transition: background 0.12s, color 0.12s;
 }
 
-.speed-btn:hover { color: var(--text); background: var(--border); }
-.speed-btn.active { background: var(--accent); border-color: transparent; color: #fff; }
+.speed-btn:hover,
+.gap-btn:hover { color: var(--text); background: var(--border); }
+
+.speed-btn.active,
+.gap-btn.active { background: var(--accent); border-color: transparent; color: #fff; }
 
 /* ── Progress bar ── */
 #progress-container {

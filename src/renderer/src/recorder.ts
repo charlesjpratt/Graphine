@@ -30,7 +30,10 @@ export class Recorder {
   private el: HTMLElement
   private frames: Frame[] = []
   private startTime = 0
-  private lastEventTime = 0
+  // Anchor for the next frame's delta: the time of the last frame actually recorded, NOT of
+  // the last input event seen. Events that change nothing are dropped, and dropping one must
+  // not also drop the time that passed before it — that time belongs to the next real edit.
+  private lastFrameTime = 0
   private lastHtml = ''
   private handler: ((e: Event) => void) | null = null
   private internalInsertPending = false
@@ -53,7 +56,7 @@ export class Recorder {
     this.lastHtml = ''
     this.internalInsertPending = false
     this.startTime = Date.now()
-    this.lastEventTime = this.startTime
+    this.lastFrameTime = this.startTime
     this.attach()
   }
 
@@ -61,7 +64,7 @@ export class Recorder {
   // resetting startTime — used to keep a recording alive after a cancelled/failed save.
   resume(): void {
     if (this.handler) return
-    this.lastEventTime = Date.now()
+    this.lastFrameTime = Date.now()
     this.attach()
   }
 
@@ -69,17 +72,18 @@ export class Recorder {
     this.handler = (e: Event) => {
       const now = Date.now()
       const html = this.el.innerHTML
-      if (this.frames.length > 0 && html === this.lastHtml) {
-        this.lastEventTime = now
-        return
-      }
+      // An input event that left the HTML untouched (a formatting command that changed
+      // nothing, say) produces no frame — and deliberately leaves lastFrameTime alone, so the
+      // pause it happened in is still measured from the last real edit and replays at its
+      // true length.
+      if (this.frames.length > 0 && html === this.lastHtml) return
       // First frame is a self-contained keyframe; later frames are deltas that carry the
       // recorded edit intent so replay classifies provenance from truth, not inference.
       let frame: Frame
       if (this.frames.length === 0) {
         frame = { t: 0, v: html }
       } else {
-        frame = { t: now - this.lastEventTime, d: buildDelta(this.lastHtml, html) }
+        frame = { t: now - this.lastFrameTime, d: buildDelta(this.lastHtml, html) }
         const inputType = (e as InputEvent).inputType
         // A paste/drop of content that originated inside the doc is an internal copy or move,
         // not incoming content: record it as 'internal' so replay inherits the source's
@@ -95,7 +99,7 @@ export class Recorder {
       }
       this.frames.push(frame)
       this.lastHtml = html
-      this.lastEventTime = now
+      this.lastFrameTime = now
     }
 
     this.el.addEventListener('input', this.handler)
@@ -107,16 +111,16 @@ export class Recorder {
     if (baseline) frame.baseline = true
     this.frames.push(frame)
     this.lastHtml = html
-    this.lastEventTime = Date.now()
+    this.lastFrameTime = Date.now()
   }
 
   captureTabSwitch(toTabId: string, toTabName: string): void {
     const now = Date.now()
     const html = this.el.innerHTML
-    const delta = this.frames.length === 0 ? 0 : now - this.lastEventTime
+    const delta = this.frames.length === 0 ? 0 : now - this.lastFrameTime
     this.frames.push({ t: delta, v: html, tabSwitch: { toTabId, toTabName } })
     this.lastHtml = html
-    this.lastEventTime = now
+    this.lastFrameTime = now
   }
 
   get isRecording(): boolean {

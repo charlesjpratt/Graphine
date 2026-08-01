@@ -1,4 +1,5 @@
 import { AppState } from './types'
+import { basename } from './document'
 
 let toastTimeout: ReturnType<typeof setTimeout> | null = null
 let inactivityTimeout: ReturnType<typeof setTimeout> | null = null
@@ -44,6 +45,17 @@ export function showToast(message: string, type: 'success' | 'error' = 'success'
     toast.className = ''
     toast.textContent = ''
   }, 3000)
+}
+
+// Centre of the header: the open file's name, or "Untitled" until it has one on
+// disk, with a dot while the in-memory document is ahead of the saved copy.
+export function setDocTitle(filePath: string | null, dirty: boolean): void {
+  const title = document.getElementById('doc-title')!
+  const name = document.getElementById('doc-title-name')!
+
+  name.textContent = filePath ? basename(filePath) : 'Untitled'
+  title.classList.toggle('untitled', filePath === null)
+  title.classList.toggle('dirty', dirty)
 }
 
 export function updateStats(typed: number, pasted: number, overwrite: number): void {

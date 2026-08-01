@@ -9,6 +9,10 @@
 <body data-view="write" data-state="recording">
   <header>
     <div id="drag-region"></div>
+    <div id="doc-title">
+      <span id="doc-title-name">Untitled</span>
+      <span id="doc-title-dot" aria-hidden="true">•</span>
+    </div>
     <nav>
       <button id="tab-write" class="tab active" aria-pressed="true">Write</button>
       <button id="tab-replay" class="tab" aria-pressed="false">Replay</button>
@@ -95,11 +99,22 @@
             <button id="btn-stop-playback" disabled>Stop</button>
             <button id="btn-skip-end" disabled>Skip to End</button>
           </div>
-          <div id="speed-controls" aria-label="Playback speed">
-            <button class="speed-btn active" data-speed="1" aria-pressed="true">1×</button>
-            <button class="speed-btn" data-speed="2" aria-pressed="false">2×</button>
-            <button class="speed-btn" data-speed="5" aria-pressed="false">5×</button>
-            <button class="speed-btn" data-speed="10" aria-pressed="false">10×</button>
+          <div id="playback-options">
+            <div id="speed-controls" role="group" aria-label="Playback speed">
+              <span class="opt-label">Speed</span>
+              <button class="speed-btn active" data-speed="1" aria-pressed="true">1×</button>
+              <button class="speed-btn" data-speed="2" aria-pressed="false">2×</button>
+              <button class="speed-btn" data-speed="5" aria-pressed="false">5×</button>
+              <button class="speed-btn" data-speed="10" aria-pressed="false">10×</button>
+            </div>
+            <div id="gap-controls" role="group" aria-label="Maximum pause">
+              <span class="opt-label">Max pause</span>
+              <button class="gap-btn" data-gap="500" aria-pressed="false" title="Skim: pauses collapse to half a second">0.5s</button>
+              <button class="gap-btn" data-gap="1000" aria-pressed="false">1s</button>
+              <button class="gap-btn active" data-gap="3000" aria-pressed="true">3s</button>
+              <button class="gap-btn" data-gap="10000" aria-pressed="false">10s</button>
+              <button class="gap-btn" data-gap="Infinity" aria-pressed="false" title="Replay every pause at its recorded length">Full</button>
+            </div>
           </div>
           <div
             id="progress-container"

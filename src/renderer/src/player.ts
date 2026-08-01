@@ -296,16 +296,28 @@ export class Player {
   setOptions(options: Partial<PlaybackOptions>): void {
     const speedChanged =
       options.speedMultiplier != null && options.speedMultiplier !== this.options.speedMultiplier
+    const gapChanged =
+      options.maxGapMs != null && options.maxGapMs !== this.options.maxGapMs
 
     // Bank the time already played at the old rate before the new one takes effect, then
     // re-anchor. Also re-time the frame already in flight so the change is felt immediately
     // rather than after the pending delay.
-    if (speedChanged && this.playing) {
+    if ((speedChanged || gapChanged) && this.playing) {
       this.elapsedMs = this.recordedElapsed()
       this.playbackStartTime = Date.now()
     }
     this.options = { ...this.options, ...options }
-    if (speedChanged && this.playing) {
+
+    // A new clamp rewrites the recorded timeline itself, so the banked elapsedMs — measured
+    // in clamped ms — no longer means anything. Re-anchor to the boundary of the frame that
+    // is next to play: position in the document is what the viewer is holding onto, not a
+    // millisecond offset. Any part of the current gap already waited out is forgiven.
+    if (gapChanged) {
+      this.computeDelays()
+      this.elapsedMs = this.cursor > 0 ? this.cumulativeDelays[this.cursor - 1] : 0
+    }
+
+    if ((speedChanged || gapChanged) && this.playing) {
       this.clearTimer()
       this.scheduleNext()
     }
@@ -359,7 +371,12 @@ export class Player {
     this.frames = recording.frames
     this.resetState()
     this.currentTabId = startTabId ?? null
+    this.computeDelays()
+  }
 
+  // The playback timeline: real recorded gaps with each one capped at maxGapMs, so long
+  // pauses for thought don't replay as dead air. An infinite cap means true real time.
+  private computeDelays(): void {
     let acc = 0
     this.cumulativeDelays = this.frames.map((f) => {
       acc += Math.min(f.t, this.options.maxGapMs)
