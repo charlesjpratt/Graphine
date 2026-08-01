@@ -9,10 +9,6 @@
 <body data-view="write" data-state="recording">
   <header>
     <div id="drag-region"></div>
-    <div id="doc-title">
-      <span id="doc-title-name">Untitled</span>
-      <span id="doc-title-dot" aria-hidden="true">•</span>
-    </div>
     <nav>
       <button id="tab-write" class="tab active" aria-pressed="true">Write</button>
       <button id="tab-replay" class="tab" aria-pressed="false">Replay</button>
@@ -72,6 +68,12 @@
     <main>
       <section id="write-view" aria-label="Write">
         <div id="write-scroll">
+          <div id="doc-badge">
+            <span id="doc-badge-pill">
+              <span id="doc-badge-name">Untitled</span>
+              <span id="doc-badge-dot" aria-hidden="true">•</span>
+            </span>
+          </div>
           <div
             id="write-area"
             contenteditable="true"

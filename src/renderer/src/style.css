@@ -14,9 +14,9 @@
   --accent-hover: #1d4ed8;
   --border: #e0dedd;
   --rec-red: #ef4444;
-  /* 18px title line stacked on top of the 46px control row */
-  --header-h: 64px;
-  --doc-title-h: 18px;
+  --header-h: 48px;
+  /* Reserved for the document badge at the top of the writing column. */
+  --doc-badge-h: 34px;
   --max-w: 700px;
   --font-ui: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
   --font-write: 'Georgia', 'Times New Roman', serif;
@@ -61,8 +61,7 @@ header {
   display: grid;
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  /* Top padding reserves the title line; everything else centres in what's left. */
-  padding: var(--doc-title-h) 1.25rem 0;
+  padding: 0 1.25rem;
   border-bottom: 1px solid var(--border);
   background: var(--bg);
   transition: opacity 0.35s, padding-left 0.28s ease;
@@ -89,54 +88,6 @@ body.controls-hidden header {
 #drag-region {
   display: none;
 }
-
-/* ── Document title ── */
-/* Spans the whole header so the name centres on the window, not on whatever
-   padding the platform's window controls happen to need. */
-#doc-title {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: var(--doc-title-h);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 5px;
-  padding: 0 1.25rem;
-  font-size: 11px;
-  color: var(--text-muted);
-  white-space: nowrap;
-  overflow: hidden;
-  pointer-events: none;
-}
-
-/* Keep a long name clear of the macOS traffic lights on both sides so it stays centred. */
-body[data-platform="darwin"] #doc-title {
-  padding: 0 90px;
-}
-
-body[data-platform="darwin"][data-fullscreen="true"] #doc-title {
-  padding: 0 1.25rem;
-}
-
-#doc-title-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-#doc-title.untitled #doc-title-name {
-  font-style: italic;
-}
-
-/* Unsaved-changes marker */
-#doc-title-dot {
-  flex: none;
-  opacity: 0;
-  transition: opacity 0.2s;
-}
-
-#doc-title.dirty #doc-title-dot { opacity: 1; }
 
 /* Track assignment. Both centre groups and both right-hand groups are mutually exclusive by
    view (the other is display:none, so it claims no cell) — naming the column explicitly is
@@ -540,11 +491,14 @@ body[data-view="replay"] #write-view  { visibility: hidden;  pointer-events: non
   overflow: hidden;
 }
 
+/* A column, so the document badge can stack above the text; align-items keeps both centred
+   in the pane exactly as justify-content did when this was a row. */
 #write-scroll {
   flex: 1;
   min-width: 0;
   display: flex;
-  justify-content: center;
+  flex-direction: column;
+  align-items: center;
   overflow-y: auto;
   scrollbar-width: none;
 }
@@ -552,6 +506,58 @@ body[data-view="replay"] #write-view  { visibility: hidden;  pointer-events: non
 #write-scroll::-webkit-scrollbar {
   display: none;
 }
+
+/* ── Document badge ── */
+/* Sticks to the top of the writing column so the file stays identifiable while scrolling.
+   Full column width carrying the page background, so text passes underneath it cleanly
+   instead of showing through around the pill. */
+#doc-badge {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  flex: none;
+  width: 100%;
+  max-width: var(--max-w);
+  height: var(--doc-badge-h);
+  display: flex;
+  align-items: center;
+  /* Matches the write area's own side padding, so the pill starts on the text's left edge. */
+  padding: 0 2rem;
+  background: var(--bg);
+}
+
+#doc-badge-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+#doc-badge-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#doc-badge.untitled #doc-badge-name {
+  font-style: italic;
+}
+
+/* Unsaved-changes marker */
+#doc-badge-dot {
+  flex: none;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+#doc-badge.dirty #doc-badge-dot { opacity: 1; }
 
 /* ── Minimap ── */
 #minimap-wrap {
@@ -609,7 +615,10 @@ body[data-view="replay"] #minimap-wrap {
 #write-area {
   width: 100%;
   max-width: var(--max-w);
-  min-height: 100%;
+  /* Fills the rest of the pane below the badge, so clicking empty space still lands in the
+     editor — without the badge's height pushing the document into a permanent scroll. */
+  flex: none;
+  min-height: calc(100% - var(--doc-badge-h));
   border: none;
   outline: none;
   background: transparent;
