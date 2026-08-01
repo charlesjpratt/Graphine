@@ -52,9 +52,14 @@ body {
 }
 
 /* ── Header ── */
+/* Three tracks — left group, centre group, right group — rather than a centre absolutely
+   positioned over a flex row. Equal 1fr sides put the centre track exactly on the window
+   centre whenever there is room for it, and because tracks cannot overlap, a centre group
+   too wide for its share pushes the sides apart instead of colliding with them. */
 header {
   position: relative;
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
   /* Top padding reserves the title line; everything else centres in what's left. */
   padding: var(--doc-title-h) 1.25rem 0;
@@ -133,10 +138,35 @@ body[data-platform="darwin"][data-fullscreen="true"] #doc-title {
 
 #doc-title.dirty #doc-title-dot { opacity: 1; }
 
+/* Track assignment. Both centre groups and both right-hand groups are mutually exclusive by
+   view (the other is display:none, so it claims no cell) — naming the column explicitly is
+   what lets either one land in the right place. */
 nav {
+  grid-column: 1;
+  justify-self: start;
   display: flex;
   gap: 2px;
   -webkit-app-region: no-drag;
+}
+
+#format-controls,
+#char-stats {
+  grid-column: 2;
+  min-width: 0;
+}
+
+/* Fixed width, always narrower than its track — centring the box is enough. */
+#char-stats { justify-self: center; }
+
+/* The toolbar fills its track and centres its own contents instead. Centring the box would
+   size it to fit-content, whose floor is min-content — the full toolbar width — so a track
+   too narrow for it would leave it overflowing symmetrically onto both neighbours. */
+#format-controls { justify-self: stretch; }
+
+#replay-header-controls,
+#record-controls {
+  grid-column: 3;
+  justify-self: end;
 }
 
 .tab {
@@ -157,17 +187,23 @@ nav {
 
 /* ── Format controls ── */
 #format-controls {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  /* Pinned below the title line rather than left to the flex static position. */
-  top: var(--doc-title-h);
-  bottom: 0;
   display: flex;
   align-items: center;
+  /* `safe` degrades to flex-start once the content overflows — plain `center` would push the
+     first buttons past the scroll origin where they can never be reached. */
+  justify-content: safe center;
   gap: 6px;
   -webkit-app-region: no-drag;
+  /* Below the ~790px where the three groups stop fitting, scroll the toolbar rather than
+     let it clip or shove the record controls off the window edge. */
+  overflow-x: auto;
+  scrollbar-width: none;
 }
+
+#format-controls::-webkit-scrollbar { display: none; }
+
+/* Toolbar items keep their size inside the scroller instead of being squeezed. */
+#format-controls > * { flex: none; }
 
 body[data-view="replay"] #format-controls {
   display: none;
@@ -244,7 +280,6 @@ body[data-view="replay"] #format-controls {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-left: auto;
   -webkit-app-region: no-drag;
 }
 
@@ -257,7 +292,6 @@ body[data-view="write"] #replay-header-controls {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-left: auto;
   -webkit-app-region: no-drag;
 }
 
@@ -642,11 +676,6 @@ body[data-replay-available="false"][data-view="replay"] #replay-area,
 body[data-replay-available="false"][data-view="replay"] #player-controls { visibility: hidden; }
 
 #char-stats {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  top: var(--doc-title-h);
-  bottom: 0;
   width: 200px;
   display: flex;
   flex-direction: column;
