@@ -49,6 +49,29 @@ function verifyAndStrip(json: string): string {
 
 let mainWindow: BrowserWindow | null = null
 
+// A native save/open dialog is parented to the main window, so opening one blurs the window
+// and closing it focuses the window again — exactly the event pair an app switch produces.
+// Suppress focus reporting for the lifetime of any dialog, plus a short grace period, so the
+// renderer never mistakes "you used the save dialog" for "you left the app and came back".
+let dialogDepth = 0
+let dialogGraceUntil = 0
+
+function focusReportingSuppressed(): boolean {
+  return dialogDepth > 0 || Date.now() < dialogGraceUntil
+}
+
+async function duringDialog<T>(fn: () => Promise<T>): Promise<T> {
+  dialogDepth++
+  try {
+    return await fn()
+  } finally {
+    dialogDepth--
+    // The window's 'focus' event lands a tick or two after the dialog promise settles,
+    // so hold the suppression briefly past the close rather than lifting it immediately.
+    dialogGraceUntil = Date.now() + 500
+  }
+}
+
 function createWindow(): void {
   const isMac = process.platform === 'darwin'
 
@@ -62,6 +85,10 @@ function createWindow(): void {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // Chromium throttles timers in backgrounded/occluded windows, which would stretch the
+      // renderer's one-minute autosave countdown by an unpredictable amount in exactly the
+      // case it matters most: the user has walked away and the window is buried.
+      backgroundThrottling: false,
     },
   })
 
@@ -70,6 +97,18 @@ function createWindow(): void {
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  // Report OS-level focus changes so the renderer can nudge the user to save after they
+  // come back from another app. Electron only knows "this window is/isn't focused" —
+  // which app took focus is not available without a native helper.
+  mainWindow.on('blur', () => {
+    if (focusReportingSuppressed()) return
+    mainWindow?.webContents.send('window:focus', false)
+  })
+  mainWindow.on('focus', () => {
+    if (focusReportingSuppressed()) return
+    mainWindow?.webContents.send('window:focus', true)
+  })
 
   mainWindow.on('enter-full-screen', () => {
     mainWindow?.webContents.send('window:fullscreen', true)
@@ -210,14 +249,14 @@ function buildMenu(): void {
 
 ipcMain.handle('dialog:save', async (_e, json: string, defaultName: string) => {
   if (!mainWindow) return null
-  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+  const { canceled, filePath } = await duringDialog(() => dialog.showSaveDialog(mainWindow!, {
     title: 'Save Recording',
     defaultPath: defaultName,
     filters: [
       { name: 'Graphine Recording', extensions: ['grph'] },
       { name: 'All Files', extensions: ['*'] },
     ],
-  })
+  }))
   if (canceled || !filePath) return null
   await writeFile(filePath, addHmac(json), 'utf8')
   return filePath
@@ -225,14 +264,14 @@ ipcMain.handle('dialog:save', async (_e, json: string, defaultName: string) => {
 
 ipcMain.handle('dialog:open', async () => {
   if (!mainWindow) return null
-  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+  const { canceled, filePaths } = await duringDialog(() => dialog.showOpenDialog(mainWindow!, {
     title: 'Open File',
     filters: [
       { name: 'Graphine Recording', extensions: ['grph'] },
       { name: 'All Files', extensions: ['*'] },
     ],
     properties: ['openFile'],
-  })
+  }))
   if (canceled || filePaths.length === 0) return null
   const raw = await readFile(filePaths[0], 'utf8')
   const content = verifyAndStrip(raw)
@@ -266,14 +305,14 @@ ipcMain.handle('dialog:export-pdf', async (_e, html: string, defaultName: string
       margins: { marginType: 'default' },
     })
 
-    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    const { canceled, filePath } = await duringDialog(() => dialog.showSaveDialog(mainWindow!, {
       title: 'Export to PDF',
       defaultPath: defaultName,
       filters: [
         { name: 'PDF Document', extensions: ['pdf'] },
         { name: 'All Files', extensions: ['*'] },
       ],
-    })
+    }))
     if (canceled || !filePath) return null
     await writeFile(filePath, buffer)
     return filePath

@@ -7,6 +7,7 @@ declare global {
       writeToPath(filePath: string, json: string): Promise<void>
       exportPdf(html: string, defaultName: string): Promise<string | null>
       onMenuAction(callback: (action: string) => void): () => void
+      onFocusChange(callback: (isFocused: boolean) => void): () => void
       onFullscreenChange(callback: (isFullscreen: boolean) => void): () => void
     }
   }

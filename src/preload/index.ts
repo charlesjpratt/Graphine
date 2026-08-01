@@ -21,6 +21,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     return () => ipcRenderer.removeListener('menu:action', handler)
   },
 
+  onFocusChange: (callback: (isFocused: boolean) => void): (() => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, isFocused: boolean) => callback(isFocused)
+    ipcRenderer.on('window:focus', handler)
+    return () => ipcRenderer.removeListener('window:focus', handler)
+  },
+
   onFullscreenChange: (callback: (isFullscreen: boolean) => void): (() => void) => {
     const handler = (_e: Electron.IpcRendererEvent, isFullscreen: boolean) => callback(isFullscreen)
     ipcRenderer.on('window:fullscreen', handler)

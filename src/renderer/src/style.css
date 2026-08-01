@@ -705,6 +705,77 @@ body[data-view="write"] #char-stats { display: none; }
   transition: width 0.08s linear;
 }
 
+/* ── Save reminder (shown on returning from another app) ── */
+#save-reminder-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg) 65%, transparent);
+  backdrop-filter: blur(2px);
+  animation: reminder-fade 0.14s ease-out;
+}
+
+#save-reminder-backdrop[hidden] { display: none; }
+
+#save-reminder {
+  width: min(360px, calc(100vw - 48px));
+  padding: 20px 22px 16px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  animation: reminder-rise 0.16s ease-out;
+}
+
+#save-reminder h2 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+#save-reminder p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+#save-reminder-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+/* Padding, radius and base colours come from the global button rule above. */
+#btn-reminder-save {
+  background: var(--accent);
+  color: #fff;
+  border-color: transparent;
+}
+#btn-reminder-save:hover { background: var(--accent-hover); }
+
+#btn-reminder-save:focus-visible,
+#btn-reminder-dismiss:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@keyframes reminder-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes reminder-rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #save-reminder-backdrop,
+  #save-reminder { animation: none; }
+}
+
 /* ── Toast ── */
 #toast {
   position: fixed;

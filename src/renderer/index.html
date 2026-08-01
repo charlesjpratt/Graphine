@@ -115,6 +115,23 @@
     </main>
   </div>
 
+  <div id="save-reminder-backdrop" hidden>
+    <div
+      id="save-reminder"
+      role="alertdialog"
+      aria-modal="true"
+      aria-labelledby="save-reminder-title"
+      aria-describedby="save-reminder-body"
+    >
+      <h2 id="save-reminder-title">Welcome back</h2>
+      <p id="save-reminder-body">You stepped away from Graphine. Remember to save your work.</p>
+      <div id="save-reminder-actions">
+        <button id="btn-reminder-dismiss">Not now</button>
+        <button id="btn-reminder-save">Save now</button>
+      </div>
+    </div>
+  </div>
+
   <div id="toast" aria-live="polite" aria-atomic="true"></div>
 
   <script type="module" src="/src/main.ts"></script>

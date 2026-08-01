@@ -37,6 +37,9 @@ const tabSidebar = document.getElementById('tab-sidebar') as HTMLElement
 const btnSidebarToggle = document.getElementById('btn-sidebar-toggle') as HTMLButtonElement
 const fontFamilySelect = document.getElementById('font-family-select') as HTMLSelectElement
 const btnWordCount = document.getElementById('btn-word-count') as HTMLButtonElement
+const saveReminderBackdrop = document.getElementById('save-reminder-backdrop') as HTMLDivElement
+const btnReminderSave = document.getElementById('btn-reminder-save') as HTMLButtonElement
+const btnReminderDismiss = document.getElementById('btn-reminder-dismiss') as HTMLButtonElement
 
 // ── Font family ───────────────────────────────────────────────────────────────
 
@@ -166,11 +169,66 @@ const tabBarCallbacks = {
       // need to persist it onto the tab model here.
       const t = tabs.find(t => t.id === id)
       if (t) t.name = newName
+      // Tab names are part of the saved payload, so a rename is an unsaved change even
+      // though it never touches the write area and so fires no input event.
+      markDirty()
     })
   },
 }
 
-async function doSave(): Promise<void> {
+// ── Autosave ──────────────────────────────────────────────────────────────────
+
+// Once the document has a file on disk, a pause in editing writes it back silently, so an
+// unattended session can never lose more than a minute of work.
+//
+// "Inactive" here means no edits — deliberately not the broader mouse/keyboard activity the
+// inactivity-based control hiding watches. A reader nudging the mouse over a finished
+// paragraph is idle for our purposes, and treating that as activity would let unsaved
+// changes sit in memory indefinitely, which is the exact failure autosave exists to prevent.
+const AUTOSAVE_IDLE_MS = 60_000
+
+let dirtySinceSave = false
+let autosaveTimer: ReturnType<typeof setTimeout> | null = null
+let saveInFlight = false
+
+// Every document mutation restarts the countdown, so the write lands a minute after the
+// user actually stops, not a minute after they started.
+function markDirty(): void {
+  dirtySinceSave = true
+  if (autosaveTimer) clearTimeout(autosaveTimer)
+  autosaveTimer = setTimeout(runAutosave, AUTOSAVE_IDLE_MS)
+}
+
+// Called on every successful write, manual or automatic.
+function markSaved(): void {
+  dirtySinceSave = false
+  if (autosaveTimer) clearTimeout(autosaveTimer)
+  autosaveTimer = null
+}
+
+function runAutosave(): void {
+  autosaveTimer = null
+  // Autosave only ever overwrites a file the user already chose: with no path it would fall
+  // through to the Save-As branch and throw a native dialog at an absent user.
+  if (!currentFilePath || !dirtySinceSave || saveInFlight) return
+  const st = activeTab().state
+  if (st === AppState.Playing || st === AppState.Paused) return
+  doSave(true)
+}
+
+// Wrapper so an autosave timer can tell whether a save is already running — the native
+// dialog in the Save-As branch keeps performSave in flight for as long as the user leaves
+// it open, and a second concurrent save would merge the same recorder frames twice.
+async function doSave(auto = false): Promise<void> {
+  saveInFlight = true
+  try {
+    await performSave(auto)
+  } finally {
+    saveInFlight = false
+  }
+}
+
+async function performSave(auto: boolean): Promise<void> {
   const tab = activeTab()
   // Only consume the recorder while it's live. stop() deliberately leaves frames in
   // place so a cancelled save can resume(); calling it again after a successful save
@@ -198,7 +256,8 @@ async function doSave(): Promise<void> {
     || tabRecording !== null
     || tabs.some((t, i) => i !== activeTabIndex && t.loadedRecording !== null)
   if (!hasAnyContent) {
-    showToast('Nothing recorded yet', 'error')
+    // An autosave firing on an empty document is a no-op, not a user error worth a toast.
+    if (!auto) showToast('Nothing recorded yet', 'error')
     if (wasRecording) recorder.resume()
     return
   }
@@ -213,9 +272,10 @@ async function doSave(): Promise<void> {
   try {
     if (currentFilePath) {
       await window.electronAPI.writeToPath(currentFilePath, json)
+      markSaved()
       updateReplayAvailable()
       transition(AppState.Recorded)
-      showToast(`Saved to ${basename(currentFilePath)}`)
+      showToast(`${auto ? 'Autosaved' : 'Saved'} to ${basename(currentFilePath)}`)
     } else {
       const refRecording = sessionRecording ?? tabRecording ?? tabs.find(t => t.loadedRecording !== null)?.loadedRecording
       const defaultName = refRecording
@@ -224,6 +284,7 @@ async function doSave(): Promise<void> {
       const savedPath = await window.electronAPI.saveRecording(json, defaultName)
       if (savedPath) {
         currentFilePath = savedPath
+        markSaved()
         updateReplayAvailable()
         transition(AppState.Recorded)
         showToast(`Saved to ${basename(savedPath)}`)
@@ -239,6 +300,10 @@ async function doSave(): Promise<void> {
     tab.loadedRecording = prevLoaded
     showToast('Failed to save recording', 'error')
     if (wasRecording) recorder.resume()
+    // dirtySinceSave is still set, but the countdown that fired has already been consumed —
+    // restart it, or a failed write on an idle machine would never be retried, since there
+    // is no further edit coming to reschedule it.
+    if (auto) autosaveTimer = setTimeout(runAutosave, AUTOSAVE_IDLE_MS)
   }
 }
 
@@ -288,6 +353,8 @@ async function doOpen(): Promise<void> {
     sessionRecording = loadedSession
     sessionStartTabId = (doc as GraphineDocument).sessionStartTabId ?? null
     currentFilePath = result.filePath
+    // Freshly loaded from disk, so in-memory and on-disk agree until the next edit.
+    markSaved()
     tabs = doc.tabs.map(t => ({
       id: t.id,
       name: t.name,
@@ -376,6 +443,8 @@ function doNew(): void {
   else if (activeTab().state === AppState.Playing || activeTab().state === AppState.Paused) player.stop()
 
   currentFilePath = null
+  // No path and no edits yet — cancel any countdown left over from the discarded document.
+  markSaved()
   sessionRecording = null
   sessionStartTabId = null
   tabs = [createTab('Tab 1')]
@@ -403,6 +472,7 @@ function doNewTab(): void {
   }
   tabs.push(createTab(`Tab ${++tabSeq}`))
   switchActiveTab(tabs.length - 1)
+  markDirty()
 }
 
 function doCloseTab(tabId: string): void {
@@ -443,6 +513,7 @@ function doCloseTab(tabId: string): void {
   }
 
   renderTabBar(tabs, activeTab().id, docTabBar, tabBarCallbacks)
+  markDirty()
 }
 
 function switchActiveTab(toIndex: number): void {
@@ -595,6 +666,83 @@ window.electronAPI.onFullscreenChange((isFullscreen) => {
   document.body.dataset.fullscreen = String(isFullscreen)
 })
 
+// ── Save reminder ─────────────────────────────────────────────────────────────
+
+// Nudge the user to save once they return from another app. The main process only reports
+// window-level focus (it can't see WHICH app took over), and it already suppresses the
+// blur/focus pair a native save/open dialog produces — so a report of lost focus here really
+// does mean the user left Graphine. Only a return that follows a departure opens the dialog,
+// so it never fires on launch.
+let wasBlurred = false
+// Where the caret was when focus left, so dismissing puts the user back where they were
+// instead of at the top of the document.
+let reminderSavedRange: Range | null = null
+
+function showSaveReminder(): void {
+  if (!saveReminderBackdrop.hidden) return
+  const sel = window.getSelection()
+  reminderSavedRange = sel && sel.rangeCount > 0 && writeArea.contains(sel.getRangeAt(0).commonAncestorContainer)
+    ? sel.getRangeAt(0).cloneRange()
+    : null
+  saveReminderBackdrop.hidden = false
+  btnReminderSave.focus()
+}
+
+function hideSaveReminder(): void {
+  if (saveReminderBackdrop.hidden) return
+  saveReminderBackdrop.hidden = true
+  if (document.body.dataset.view !== 'write') return
+  writeArea.focus()
+  if (reminderSavedRange) {
+    const sel = window.getSelection()
+    sel?.removeAllRanges()
+    sel?.addRange(reminderSavedRange)
+  }
+  reminderSavedRange = null
+}
+
+window.electronAPI.onFocusChange((isFocused) => {
+  if (!isFocused) {
+    wasBlurred = true
+    return
+  }
+  if (!wasBlurred) return
+  wasBlurred = false
+  // A long absence is exactly when autosave fires, so by the time the user gets back the
+  // work may already be on disk. Nagging them to save what is demonstrably saved would be
+  // worse than saying nothing.
+  if (currentFilePath !== null && !dirtySinceSave) return
+  showSaveReminder()
+})
+
+btnReminderDismiss.addEventListener('click', hideSaveReminder)
+
+btnReminderSave.addEventListener('click', () => {
+  // Close first: doSave opens a native dialog, and leaving the modal up behind it would
+  // trap focus once the dialog returns.
+  hideSaveReminder()
+  doSave()
+})
+
+// Escape dismisses; Tab is trapped between the two buttons so focus can't wander into the
+// editor behind the modal.
+saveReminderBackdrop.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.preventDefault()
+    hideSaveReminder()
+    return
+  }
+  if (e.key !== 'Tab') return
+  e.preventDefault()
+  const next = document.activeElement === btnReminderSave ? btnReminderDismiss : btnReminderSave
+  next.focus()
+})
+
+// Clicking the dimmed area outside the card dismisses, matching the Escape affordance.
+saveReminderBackdrop.addEventListener('mousedown', (e) => {
+  if (e.target === saveReminderBackdrop) hideSaveReminder()
+})
+
 // ── Menu actions ──────────────────────────────────────────────────────────────
 
 window.electronAPI.onMenuAction((action) => {
@@ -628,6 +776,9 @@ function ensureRecordingStarted(): void {
 }
 
 writeArea.addEventListener('input', ensureRecordingStarted)
+// Covers every edit path, not just typing: paste, drop, undo/redo and the formatting
+// commands all reach the recorder by dispatching an input event on the write area.
+writeArea.addEventListener('input', markDirty)
 
 // ── Undo / redo ───────────────────────────────────────────────────────────────
 
@@ -638,6 +789,8 @@ writeArea.addEventListener('input', ensureRecordingStarted)
 // that intent is what lets replay give restored characters back their original provenance.
 function applyHistoryStep(step: 'undo' | 'redo'): void {
   if (document.body.dataset.view !== 'write') return
+  // The save reminder is modal — don't let Ctrl+Z rewrite the document behind it.
+  if (!saveReminderBackdrop.hidden) return
   const st = activeTab().state
   if (st === AppState.Playing || st === AppState.Paused) return
 
@@ -787,10 +940,12 @@ writeArea.addEventListener('paste', (e: ClipboardEvent) => {
   writeArea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertFromPaste' }))
 })
 
-btnStopSave.addEventListener('click', doSave)
+// Wrapped, not passed directly: doSave's first parameter is the autosave flag, and a
+// listener bound straight to it would hand the MouseEvent over as a truthy `auto`.
+btnStopSave.addEventListener('click', () => doSave())
 btnOpenHeader.addEventListener('click', doOpen)
 btnNew.addEventListener('click', doNew)
-document.getElementById('btn-save-for-replay')!.addEventListener('click', doSave)
+document.getElementById('btn-save-for-replay')!.addEventListener('click', () => doSave())
 document.getElementById('btn-open-replay')!.addEventListener('click', doOpen)
 btnAddTab.addEventListener('click', doNewTab)
 btnSidebarToggle.addEventListener('click', () => {
