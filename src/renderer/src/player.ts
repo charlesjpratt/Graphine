@@ -14,10 +14,17 @@ export interface CharEntry {
   textAlign?: string  // block alignment inherited from the enclosing paragraph/div
   bold?: boolean      // inside <b>/<strong> or font-weight:bold
   italic?: boolean    // inside <i>/<em> or font-style:italic
+  highlight?: boolean // marked with the toolbar highlighter
 }
 
 // pink → red over 4 steps
 export const OVERWRITE_COLORS = ['#fda4af', '#fb7185', '#f87171', '#ef4444']
+
+// The highlighter's marker teal, and the text colour it pairs with where the text has no
+// provenance colour of its own. Lives here with the rest of the palette; the write-view
+// toolbar imports it so a document and its replay mark up in the same teal.
+export const HIGHLIGHT_BG = '#5eead4'
+export const HIGHLIGHT_FG = '#000'
 
 // Size fallback used ONLY on legacy frames that carry no recorded edit intent. There, a
 // deletion bigger than this many chars in a single frame — or an accumulated backspace run
@@ -41,7 +48,8 @@ function styleKey(entry: CharEntry): string {
   const f = entry.fontFamily ? `:f:${entry.fontFamily}` : ''
   const b = entry.bold ? ':b' : ''
   const i = entry.italic ? ':i' : ''
-  const s = `${f}${b}${i}`
+  const h = entry.highlight ? ':h' : ''
+  const s = `${f}${b}${i}${h}`
   if (entry.type === 'typed') return s ? `t${s}` : ''
   if (entry.type === 'overwrite') {
     // pasteGroup keeps a pasted-overwrite run boxed as one unit, separate from adjacent
@@ -55,7 +63,7 @@ function styleKey(entry: CharEntry): string {
 // Persistent off-screen element used to parse recorded HTML into a DOM to walk.
 let textExtractor: HTMLDivElement | null = null
 
-interface CharStyle { font: string; align: string; bold: boolean; italic: boolean }
+interface CharStyle { font: string; align: string; bold: boolean; italic: boolean; highlight: boolean }
 
 // Parse recorded HTML into the character sequence and per-character style that the replay
 // reconstructs from. We do NOT use innerText: it counts an empty <div><br></div> blank line
@@ -84,7 +92,7 @@ function htmlToTextAndStyles(html: string): { text: string; styles: CharStyle[] 
   }
   removeCursorBr(textExtractor)
 
-  const base: CharStyle = { font: '', align: '', bold: false, italic: false }
+  const base: CharStyle = { font: '', align: '', bold: false, italic: false, highlight: false }
   const chars: string[] = []
   const styles: CharStyle[] = []
   let emitted = false
@@ -121,7 +129,13 @@ function htmlToTextAndStyles(html: string): { text: string; styles: CharStyle[] 
       const nextBold = s.bold || tag === 'B' || tag === 'STRONG' || fw === 'bold' || fw === 'bolder' || parseInt(fw, 10) >= 600
       const fs = el.style.fontStyle
       const nextItalic = s.italic || tag === 'I' || tag === 'EM' || fs === 'italic' || fs === 'oblique'
-      const next: CharStyle = { font: nextFont, align: nextAlign, bold: nextBold, italic: nextItalic }
+      // The highlighter is the only thing that paints a background in the write area, so any
+      // background colour here is a highlight — and like bold/italic it inherits to children.
+      const bg = el.style.backgroundColor
+      const nextHighlight = s.highlight || (!!bg && bg !== 'transparent')
+      const next: CharStyle = {
+        font: nextFont, align: nextAlign, bold: nextBold, italic: nextItalic, highlight: nextHighlight,
+      }
       if (tag === 'BR') {
         hardBreak(s)
       } else if (tag === 'DIV' || tag === 'P') {
@@ -150,12 +164,15 @@ export function escapeHtml(s: string): string {
 
 // The style fields of a CharEntry, normalized from a CharStyle (empty/false → undefined so
 // entries stay minimal and equality checks are simple).
-function styleFields(s: CharStyle | undefined): Pick<CharEntry, 'fontFamily' | 'textAlign' | 'bold' | 'italic'> {
+function styleFields(
+  s: CharStyle | undefined,
+): Pick<CharEntry, 'fontFamily' | 'textAlign' | 'bold' | 'italic' | 'highlight'> {
   return {
     fontFamily: s?.font || undefined,
     textAlign: s?.align || undefined,
     bold: s?.bold || undefined,
     italic: s?.italic || undefined,
+    highlight: s?.highlight || undefined,
   }
 }
 
@@ -175,6 +192,10 @@ function openSpanFor(entry: CharEntry, pasteColor: string): string {
   let css = ff ? `font-family:${ff};` : ''
   if (entry.bold) css += 'font-weight:bold;'
   if (entry.italic) css += 'font-style:italic;'
+  // A highlight repaints the background only, leaving provenance to own the foreground:
+  // highlighted overwrite keeps its pink→red text, highlighted paste its yellow text and
+  // box. Both then read as marked text without losing where the text came from.
+  if (entry.highlight) css += `background-color:${HIGHLIGHT_BG};`
   if (entry.type === 'overwrite') {
     // Overwrite is red; if it also came from a paste, add the yellow box around it.
     const box = entry.pasteGroup != null ? `;${pasteBox(pasteColor)}` : ''
@@ -183,7 +204,9 @@ function openSpanFor(entry: CharEntry, pasteColor: string): string {
   if (entry.type === 'pasted') {
     return `<span style="${css}color:${pasteColor};${pasteBox(pasteColor)}">`
   }
-  return `<span style="${css}">`
+  // Typed text has no provenance colour, so highlighted it takes the same black the write
+  // view gives it — the replay area's own light-on-dark text would vanish against teal.
+  return `<span style="${css}${entry.highlight ? `color:${HIGHLIGHT_FG};` : ''}">`
 }
 
 // Renders a run of chars as one continuous inline stream: '\n' → <br>, with color/font
@@ -723,7 +746,7 @@ export class Player {
     return null
   }
 
-  // Sync font-family, alignment, and bold/italic for every char from the current frame —
+  // Sync font-family, alignment, bold/italic and highlight for every char from the frame —
   // handles styling toggled on text that already exists in the history. Returns whether any
   // char's style changed.
   private syncStyles(currStyles: CharStyle[]): boolean {
@@ -731,7 +754,8 @@ export class Player {
     for (let i = 0; i < this.history.length; i++) {
       const e = this.history[i]
       const s = styleFields(currStyles[i])
-      if (e.fontFamily !== s.fontFamily || e.textAlign !== s.textAlign || e.bold !== s.bold || e.italic !== s.italic) {
+      if (e.fontFamily !== s.fontFamily || e.textAlign !== s.textAlign || e.bold !== s.bold
+          || e.italic !== s.italic || e.highlight !== s.highlight) {
         stylesChanged = true
       }
       Object.assign(e, s)

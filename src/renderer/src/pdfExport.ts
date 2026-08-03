@@ -1,4 +1,4 @@
-import { renderHistory, OVERWRITE_COLORS, escapeHtml, type CharEntry } from './player'
+import { renderHistory, OVERWRITE_COLORS, HIGHLIGHT_BG, HIGHLIGHT_FG, escapeHtml, type CharEntry } from './player'
 
 // Builds the self-contained HTML document that the main process renders to PDF in an
 // offscreen window. Everything is inlined (no external CSS/fonts) and uses a fixed
@@ -67,6 +67,7 @@ function legendBlock(): string {
       ${item('pasted', `color:${EXPORT_PASTE};${box}`)}
       ${item('overwrite', `color:${OVERWRITE_RED}`)}
       ${item('pasted overwrite', `color:${OVERWRITE_RED};${box}`)}
+      ${item('highlighted', `background-color:${HIGHLIGHT_BG};color:${HIGHLIGHT_FG}`)}
     </div>`
 }
 
@@ -112,6 +113,9 @@ export function buildExportHtml(sections: ExportSection[], meta: ExportMeta): st
   /* The color-coded section always begins on its own page. */
   .page-break { break-before: page; page-break-before: always; }
   .doc { white-space: pre-wrap; word-wrap: break-word; tab-size: 4; }
+  /* The spans renderHistory emits carry highlight backgrounds and paste boxes; without
+     print-color-adjust the print pipeline is free to drop them. */
+  .colored span { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
   .stats { margin-top: 0.8em; font-size: 10pt; }
   .stat-bar { height: 6px; border-radius: 3px; overflow: hidden; background: #f1f1ee; margin-bottom: 0.4em; }
   .stat-labels { color: #374151; }

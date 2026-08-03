@@ -14,6 +14,10 @@
   --accent-hover: #1d4ed8;
   --border: #e0dedd;
   --rec-red: #ef4444;
+  /* Marker teal applied to highlighted text. Not themed: it is written into the document's
+     own markup, so it must look the same in light and dark. Keep in sync with
+     HIGHLIGHT_BG in player.ts, which repaints it on replay. */
+  --highlight: #5eead4;
   --header-h: 48px;
   /* Reserved for the document badge at the top of the writing column. */
   --doc-badge-h: 34px;
@@ -175,6 +179,11 @@ body[data-view="replay"] #format-controls {
 }
 
 .fmt-btn:hover { color: var(--text); background: var(--surface); }
+
+/* The marker icon carries the teal it applies, so the button reads as a colour swatch. */
+#btn-highlight { color: var(--highlight); }
+#btn-highlight:hover { color: var(--highlight); background: color-mix(in srgb, var(--highlight) 18%, transparent); }
+#btn-highlight svg path { fill: color-mix(in srgb, var(--highlight) 35%, transparent); }
 
 #btn-bold { font-size: 14px; font-weight: 700; }
 #btn-italic { font-size: 14px; font-style: italic; font-family: var(--font-write); }

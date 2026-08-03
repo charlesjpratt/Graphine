@@ -1,5 +1,5 @@
 import { Recorder } from './recorder'
-import { Player } from './player'
+import { Player, HIGHLIGHT_BG, HIGHLIGHT_FG } from './player'
 import { buildExportHtml } from './pdfExport'
 import { switchView, applyState, updateProgress, showToast, setupInactivityHiding, updateStats, setDocTitle } from './ui'
 import { AppState } from './types'
@@ -26,6 +26,7 @@ const btnStopPlayback = document.getElementById('btn-stop-playback') as HTMLButt
 const btnSkipEnd = document.getElementById('btn-skip-end') as HTMLButtonElement
 const speedBtns = document.querySelectorAll<HTMLButtonElement>('.speed-btn')
 const gapBtns = document.querySelectorAll<HTMLButtonElement>('.gap-btn')
+const btnHighlight = document.getElementById('btn-highlight') as HTMLButtonElement
 const btnBold = document.getElementById('btn-bold') as HTMLButtonElement
 const btnItalic = document.getElementById('btn-italic') as HTMLButtonElement
 const btnAlignLeft = document.getElementById('btn-align-left') as HTMLButtonElement
@@ -622,11 +623,14 @@ function outdentAtCaret(): void {
 }
 
 // Wrap a selection range in a styled span and reselect the wrapped content. Shared by the
-// font-size and font-family controls.
-function wrapRangeWithStyle(range: Range, prop: 'fontSize' | 'fontFamily', value: string): void {
+// font-size, font-family and highlight controls. inputType is the InputEvent name announced
+// for the edit, so the recorder can tell the three apart in the frame history.
+type SpanStyle = Partial<Record<'fontSize' | 'fontFamily' | 'backgroundColor' | 'color', string>>
+
+function wrapRangeWithStyle(range: Range, styles: SpanStyle, inputType: string): void {
   const fragment = range.extractContents()
   const span = document.createElement('span')
-  span.style[prop] = value
+  Object.assign(span.style, styles)
   span.appendChild(fragment)
   range.insertNode(span)
   const newRange = document.createRange()
@@ -639,7 +643,6 @@ function wrapRangeWithStyle(range: Range, prop: 'fontSize' | 'fontFamily', value
   // Announce the change as input rather than calling recorder.captureNow(): that puts it on
   // the undo stack (this path mutates the DOM directly, so nothing else would), and lets the
   // recorder time the frame like any other edit instead of stamping it t:0.
-  const inputType = prop === 'fontSize' ? 'formatFontSize' : 'formatFontName'
   writeArea.dispatchEvent(new InputEvent('input', { bubbles: true, inputType }))
 }
 
@@ -652,7 +655,7 @@ function applyFontSize(targetRem: number): void {
   const inWriteArea = range && writeArea.contains(range.commonAncestorContainer)
 
   if (range && !range.collapsed && inWriteArea) {
-    wrapRangeWithStyle(range, 'fontSize', `${currentFontSizeRem}rem`)
+    wrapRangeWithStyle(range, { fontSize: `${currentFontSizeRem}rem` }, 'formatFontSize')
   } else {
     pendingFontSize = currentFontSizeRem
   }
@@ -1034,6 +1037,23 @@ btnSkipEnd.addEventListener('click', () => {
 
 // ── Format toolbar ────────────────────────────────────────────────────────────
 
+// Highlight the selection: teal background, black text. execCommand('hiliteColor') would
+// only paint the background, leaving light-on-teal text unreadable, so wrap the range in a
+// span carrying both — the same path the font controls use, so the edit lands on the undo
+// stack and in the recording like any other.
+function applyHighlight(): void {
+  const sel = window.getSelection()
+  if (!sel || sel.rangeCount === 0) return
+  const range = sel.getRangeAt(0)
+  if (range.collapsed || !writeArea.contains(range.commonAncestorContainer)) return
+
+  wrapRangeWithStyle(range, { backgroundColor: HIGHLIGHT_BG, color: HIGHLIGHT_FG }, 'formatBackColor')
+}
+
+// mousedown + preventDefault keeps the selection alive: the button never takes focus, so the
+// range the user highlighted is still the document selection when the handler runs.
+btnHighlight.addEventListener('mousedown', (e) => { e.preventDefault(); applyHighlight() })
+
 btnBold.addEventListener('mousedown', (e) => { e.preventDefault(); document.execCommand('bold') })
 btnItalic.addEventListener('mousedown', (e) => { e.preventDefault(); document.execCommand('italic') })
 
@@ -1080,7 +1100,7 @@ fontFamilySelect.addEventListener('change', () => {
 
   const rangeToUse = savedRange && !savedRange.collapsed ? savedRange : null
   if (rangeToUse) {
-    wrapRangeWithStyle(rangeToUse, 'fontFamily', css)
+    wrapRangeWithStyle(rangeToUse, { fontFamily: css }, 'formatFontName')
   } else {
     pendingFontFamily = key
   }
