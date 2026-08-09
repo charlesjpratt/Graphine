@@ -273,6 +273,13 @@ export function renderHistory(history: CharEntry[], pasteColor: string = SCREEN_
   return html
 }
 
+// First occurrence of `text` in a char history, as the entries covering it (aligned to text),
+// or null when the history doesn't contain it.
+function findRun(history: CharEntry[], text: string): CharEntry[] | null {
+  const idx = history.map((e) => e.char).join('').indexOf(text)
+  return idx >= 0 ? history.slice(idx, idx + text.length) : null
+}
+
 // ── Player ────────────────────────────────────────────────────────────────────
 
 export class Player {
@@ -736,13 +743,24 @@ export class Player {
   }
 
   // Locate the provenance source for an internal insertion: an identical run still present in
-  // the doc (a copy/paste), or the run just removed by a cut/drag-out (a move). Returns the
-  // source char entries aligned to addedText, or null when no match is found (treat as typed).
+  // the doc (a copy/paste), the run just removed by a cut/drag-out (a move), or the same run
+  // sitting in another tab (a copy across tabs). Returns the source char entries aligned to
+  // addedText, or null when no match is found (treat as typed).
   private findInternalSource(addedText: string): CharEntry[] | null {
-    const histText = this.history.map((e) => e.char).join('')
-    const idx = histText.indexOf(addedText)
-    if (idx >= 0) return this.history.slice(idx, idx + addedText.length)
+    const local = findRun(this.history, addedText)
+    if (local) return local
     if (this.pendingRemovedRun?.text === addedText) return this.pendingRemovedRun.entries
+    // Copy in one tab, paste in another: the source run never enters the destination tab's
+    // history, so scan the parked ones too — otherwise text pasted in from outside would lose
+    // its yellow the moment it was quoted into a sibling tab. The entry for the current tab is
+    // a stale snapshot from the last time it was left (this.history above is the live one), so
+    // skip it. First match wins; the copy's own tab is not recorded, so there is nothing
+    // better to prefer between two tabs holding identical text.
+    for (const [tabId, saved] of this.tabHistories) {
+      if (tabId === this.currentTabId) continue
+      const crossTab = findRun(saved.history, addedText)
+      if (crossTab) return crossTab
+    }
     return null
   }
 
